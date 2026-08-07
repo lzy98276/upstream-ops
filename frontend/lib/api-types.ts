@@ -532,13 +532,26 @@ export interface UpstreamSyncTargetProxy {
   status: string
 }
 
-export type UpstreamSyncRateConvertMode = "raw" | "multiply_100" | "divide_100" | "custom"
+export type UpstreamSyncRateConvertMode =
+  | "raw"
+  | "multiply_100"
+  | "divide_100"
+  | "custom"
+  | "add"
+  | "subtract"
+  | "multiply"
+  | "divide"
 
 export interface UpstreamSyncAccount {
   id?: number
+  source_kind?: "channel" | "gateway_group"
   source_channel_id: number
   source_group_id?: number | null
   source_group_name?: string
+  gateway_group_id?: number | null
+  gateway_rate_mode?: "max" | "min"
+  gateway_rate_min?: number
+  gateway_rate_max?: number
   proxy_id?: number | null
   concurrency: number
   weight: number

@@ -18,6 +18,7 @@ import (
 	"github.com/bejix/upstream-ops/backend/connector"
 	"github.com/bejix/upstream-ops/backend/connector/sub2api"
 	"github.com/bejix/upstream-ops/backend/crypto"
+	"github.com/bejix/upstream-ops/backend/gateway"
 	"github.com/bejix/upstream-ops/backend/notify"
 	"github.com/bejix/upstream-ops/backend/pkg/rateconvert"
 	"github.com/bejix/upstream-ops/backend/storage"
@@ -46,6 +47,8 @@ type Service struct {
 	syncAccounts    *storage.UpstreamSyncAccounts
 	managedAccounts *storage.UpstreamSyncManagedAccounts
 	logs            *storage.UpstreamSyncLogs
+	gateway         *gateway.Service
+	gatewayBaseURL  string
 }
 
 func New(
@@ -60,6 +63,8 @@ func New(
 	syncAccounts *storage.UpstreamSyncAccounts,
 	managedAccounts *storage.UpstreamSyncManagedAccounts,
 	logs *storage.UpstreamSyncLogs,
+	gatewaySvc *gateway.Service,
+	gatewayBaseURL string,
 ) *Service {
 	return &Service{
 		channels:        channels,
@@ -73,6 +78,8 @@ func New(
 		syncAccounts:    syncAccounts,
 		managedAccounts: managedAccounts,
 		logs:            logs,
+		gateway:         gatewaySvc,
+		gatewayBaseURL:  strings.TrimRight(strings.TrimSpace(gatewayBaseURL), "/"),
 	}
 }
 
@@ -137,9 +144,14 @@ type SyncGroupDTO struct {
 
 type SyncAccountDTO struct {
 	ID               uint    `json:"id,omitempty"`
+	SourceKind       string  `json:"source_kind,omitempty"`
 	SourceChannelID  uint    `json:"source_channel_id"`
 	SourceGroupID    *int64  `json:"source_group_id,omitempty"`
 	SourceGroupName  string  `json:"source_group_name,omitempty"`
+	GatewayGroupID   *uint   `json:"gateway_group_id,omitempty"`
+	GatewayRateMode  string  `json:"gateway_rate_mode,omitempty"`
+	GatewayRateMin   float64 `json:"gateway_rate_min,omitempty"`
+	GatewayRateMax   float64 `json:"gateway_rate_max,omitempty"`
 	ProxyID          *int64  `json:"proxy_id,omitempty"`
 	Concurrency      int     `json:"concurrency"`
 	Weight           int     `json:"weight"`
@@ -428,6 +440,9 @@ func (s *Service) ListSyncGroups() ([]SyncGroupDTO, error) {
 
 func (s *Service) CreateSyncGroup(in SyncGroupDTO) (*SyncGroupDTO, error) {
 	accounts := accountItems(in.Accounts)
+	if err := s.validateGatewaySyncAccounts(accounts); err != nil {
+		return nil, err
+	}
 	sourceGroupID := int64(0)
 	sourceChannelID := uint(0)
 	if len(accounts) > 0 {
@@ -479,6 +494,9 @@ func (s *Service) CreateSyncGroup(in SyncGroupDTO) (*SyncGroupDTO, error) {
 	if err := s.syncAccounts.SaveForGroup(item.ID, accounts); err != nil {
 		return nil, err
 	}
+	if err := s.ensureGatewayKeysForGroup(item, accounts); err != nil {
+		return nil, err
+	}
 	s.notifySyncGroupChanged("新增", item, accounts)
 	return s.syncGroupDTOByItem(item), nil
 }
@@ -486,6 +504,10 @@ func (s *Service) CreateSyncGroup(in SyncGroupDTO) (*SyncGroupDTO, error) {
 func (s *Service) UpdateSyncGroup(id uint, in SyncGroupDTO) (*SyncGroupDTO, error) {
 	item, err := s.syncGroups.FindByID(id)
 	if err != nil {
+		return nil, err
+	}
+	accounts := accountItems(in.Accounts)
+	if err := s.validateGatewaySyncAccounts(accounts); err != nil {
 		return nil, err
 	}
 	item.TargetID = in.TargetID
@@ -509,11 +531,14 @@ func (s *Service) UpdateSyncGroup(id uint, in SyncGroupDTO) (*SyncGroupDTO, erro
 	if err := s.syncGroups.Update(item); err != nil {
 		return nil, err
 	}
-	if err := s.syncAccounts.SaveForGroup(item.ID, accountItems(in.Accounts)); err != nil {
+	if err := s.syncAccounts.SaveForGroup(item.ID, accounts); err != nil {
+		return nil, err
+	}
+	if err := s.ensureGatewayKeysForGroup(item, accounts); err != nil {
 		return nil, err
 	}
 	ids, _ := s.syncGroups.ParseTargetGroupIDs(item)
-	accounts, err := s.syncAccounts.ListBySyncGroupID(item.ID)
+	accounts, err = s.syncAccounts.ListBySyncGroupID(item.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -917,7 +942,7 @@ func (s *Service) applyAccountWithCleanup(
 		}
 		return syncAccountApplyOutcome{Changes: singleChange(change)}
 	}
-	if account.SourceGroupID == nil && strings.TrimSpace(account.SourceGroupName) == "" {
+	if !isGatewaySyncAccount(account) && account.SourceGroupID == nil && strings.TrimSpace(account.SourceGroupName) == "" {
 		msg := fmt.Sprintf("同步账号%d: source group not bound", account.Position+1)
 		change, err := s.ensureDisabledPlaceholderTargetForAccount(ctx, syncGroup, account, adminTarget, client, selectedGroups, remoteGroupIDs, remoteBeforeByID, now, "源分组未绑定")
 		if err != nil {
@@ -964,29 +989,64 @@ func (s *Service) applyAccount(
 	remoteBeforeByID map[int64]sub2api.AdminAccount,
 	now time.Time,
 ) (*accountApplyResult, error) {
-	ch, err := s.channels.FindByID(syncAccount.SourceChannelID)
-	if err != nil {
-		return nil, fmt.Errorf("source channel missing: %d", syncAccount.SourceChannelID)
-	}
-	sourceGroups, err := s.checkSourceGroup(ctx, syncAccount)
-	if err != nil {
-		return nil, err
-	}
+	var (
+		sourceGroups   []connector.APIKeyGroup
+		key            *connector.APIKey
+		secret         string
+		sourceName     string
+		sourceID       uint
+		sourceBaseURL  string
+		rateMultiplier float64
+		err            error
+	)
 	keyName := sourceAPIKeyName(syncGroup)
-	key, secret, err := s.ensureSourceAPIKey(ctx, syncGroup, syncAccount, keyName)
-	if err != nil {
-		return nil, err
+	if isGatewaySyncAccount(syncAccount) {
+		if syncAccount.GatewayGroupID == nil || *syncAccount.GatewayGroupID == 0 {
+			return nil, errors.New("gateway group is required")
+		}
+		gatewayGroup, groupErr := s.gateway.GetGroup(*syncAccount.GatewayGroupID)
+		if groupErr != nil {
+			return nil, fmt.Errorf("gateway group missing: %d", *syncAccount.GatewayGroupID)
+		}
+		key, secret, err = s.ensureGatewayKey(syncGroup, syncAccount, keyName)
+		if err != nil {
+			return nil, err
+		}
+		rateMultiplier, err = s.gatewayRateMultiplierForAccount(syncAccount)
+		if err != nil {
+			return nil, err
+		}
+		sourceName = "网关 " + gatewayGroup.Name
+		sourceID = gatewayGroup.ID
+		sourceBaseURL = s.gatewayBaseURL
+	} else {
+		ch, channelErr := s.channels.FindByID(syncAccount.SourceChannelID)
+		if channelErr != nil {
+			return nil, fmt.Errorf("source channel missing: %d", syncAccount.SourceChannelID)
+		}
+		sourceGroups, err = s.checkSourceGroup(ctx, syncAccount)
+		if err != nil {
+			return nil, err
+		}
+		key, secret, err = s.ensureSourceAPIKey(ctx, syncGroup, syncAccount, keyName)
+		if err != nil {
+			return nil, err
+		}
+		rateMultiplier = rateMultiplierForAccount(syncAccount, sourceGroups)
+		sourceName = ch.Name
+		sourceID = ch.ID
+		sourceBaseURL = ch.SiteURL
 	}
 	accountBaseName := managedObjectBaseName(syncGroup, syncAccount)
-	accountName := managedObjectName(syncGroup, syncAccount, ch)
-	accountReq := s.buildAdminAccount(
+	accountName := managedObjectNameForSource(syncGroup, syncAccount, sourceName)
+	accountReq := s.buildAdminAccountWithBaseURL(
 		syncGroup,
 		syncAccount,
-		ch,
+		sourceBaseURL,
 		secret,
 		remoteGroupIDs,
 		syncAccount.Position+1,
-		rateMultiplierForAccount(syncAccount, sourceGroups),
+		rateMultiplier,
 	)
 	accountReq.Name = accountName
 	accountReq.Notes = syncedAccountNotes(now)
@@ -1074,15 +1134,19 @@ func (s *Service) applyAccount(
 	if err != nil {
 		return nil, err
 	}
+	sourceGroupLabelText := sourceGroupLabel(syncAccount.SourceGroupID, syncAccount.SourceGroupName, sourceGroups)
+	if isGatewaySyncAccount(syncAccount) && syncAccount.GatewayGroupID != nil {
+		sourceGroupLabelText = fmt.Sprintf("网关组 ID %d", *syncAccount.GatewayGroupID)
+	}
 	msg := fmt.Sprintf(
 		"账号%d：%s远端账号 %s(ID %d)，源渠道 %s(ID %d)，源分组 %s，倍率 %s，权重 %d，并发 %d",
 		syncAccount.Position+1,
 		action,
 		accountName,
 		account.ID,
-		ch.Name,
-		ch.ID,
-		sourceGroupLabel(syncAccount.SourceGroupID, syncAccount.SourceGroupName, sourceGroups),
+		sourceName,
+		sourceID,
+		sourceGroupLabelText,
 		formatNumber(accountReq.RateMultiplier),
 		syncAccount.Weight,
 		positiveOrDefault(syncAccount.Concurrency, 10),
@@ -1727,14 +1791,22 @@ func (s *Service) DeleteManaged(ctx context.Context, syncGroupID uint) (*LogDTO,
 			}
 		}
 		syncAccounts, _ := s.syncAccounts.ListBySyncGroupID(syncGroup.ID)
-		channelByAccount := make(map[uint]uint, len(syncAccounts))
+		accountByID := make(map[uint]storage.UpstreamSyncAccount, len(syncAccounts))
 		for _, account := range syncAccounts {
-			channelByAccount[account.ID] = account.SourceChannelID
+			accountByID[account.ID] = account
 		}
 		for _, account := range managedAccounts {
 			if account.SourceAPIKeyName == sourceAPIKeyName(syncGroup) || strings.HasPrefix(account.SourceAPIKeyName, syncGroup.Name+"-账号") {
-				if channelID := channelByAccount[account.SyncAccountID]; channelID != 0 {
-					_ = s.channelSvc.DeleteAPIKey(ctx, channelID, account.SourceAPIKeyID)
+				syncAccount, ok := accountByID[account.SyncAccountID]
+				if !ok {
+					continue
+				}
+				if isGatewaySyncAccount(&syncAccount) {
+					if s.gateway != nil && account.SourceAPIKeyID > 0 {
+						_ = s.gateway.DeleteKey(uint(account.SourceAPIKeyID))
+					}
+				} else if syncAccount.SourceChannelID != 0 {
+					_ = s.channelSvc.DeleteAPIKey(ctx, syncAccount.SourceChannelID, account.SourceAPIKeyID)
 				}
 			}
 		}
@@ -1937,9 +2009,13 @@ func findAPIKeyByID(items []connector.APIKey, id int64) *connector.APIKey {
 }
 
 func (s *Service) buildAdminAccount(syncGroup *storage.UpstreamSyncGroup, syncAccount *storage.UpstreamSyncAccount, ch *storage.Channel, apiKey string, remoteGroupIDs []int64, priority int, rateMultiplier float64) sub2api.AdminAccount {
+	return s.buildAdminAccountWithBaseURL(syncGroup, syncAccount, ch.SiteURL, apiKey, remoteGroupIDs, priority, rateMultiplier)
+}
+
+func (s *Service) buildAdminAccountWithBaseURL(syncGroup *storage.UpstreamSyncGroup, syncAccount *storage.UpstreamSyncAccount, baseURL, apiKey string, remoteGroupIDs []int64, priority int, rateMultiplier float64) sub2api.AdminAccount {
 	credentials := map[string]any{
 		"api_key":  apiKey,
-		"base_url": ch.SiteURL,
+		"base_url": baseURL,
 	}
 	if syncGroup.PoolModeEnabled {
 		credentials["pool_mode"] = true
@@ -2007,6 +2083,9 @@ func convertRate(v float64, mode string, customValue float64) float64 {
 }
 
 func rateMultiplierForAccount(syncAccount *storage.UpstreamSyncAccount, groups []connector.APIKeyGroup) float64 {
+	if isGatewaySyncAccount(syncAccount) {
+		return 1
+	}
 	if strings.TrimSpace(syncAccount.RateConvertMode) == "custom" {
 		return syncAccount.RateConvertValue
 	}
@@ -2023,17 +2102,184 @@ func rateMultiplierForAccount(syncAccount *storage.UpstreamSyncAccount, groups [
 	return convertRate(1, syncAccount.RateConvertMode, syncAccount.RateConvertValue)
 }
 
+func normalizeSyncAccountSourceKind(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), "gateway_group") {
+		return "gateway_group"
+	}
+	return "channel"
+}
+
+func normalizeGatewayRateMode(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), "min") {
+		return "min"
+	}
+	return "max"
+}
+
+func isGatewaySyncAccount(account *storage.UpstreamSyncAccount) bool {
+	return account != nil && normalizeSyncAccountSourceKind(account.SourceKind) == "gateway_group"
+}
+
+func (s *Service) validateGatewaySyncAccounts(accounts []storage.UpstreamSyncAccount) error {
+	count := 0
+	for i := range accounts {
+		if !isGatewaySyncAccount(&accounts[i]) {
+			continue
+		}
+		count++
+		if accounts[i].GatewayGroupID == nil || *accounts[i].GatewayGroupID == 0 {
+			return fmt.Errorf("gateway multiplier sync account %d: gateway group is required", i+1)
+		}
+		if accounts[i].GatewayRateMin > 0 && accounts[i].GatewayRateMax > 0 && accounts[i].GatewayRateMin > accounts[i].GatewayRateMax {
+			return fmt.Errorf("gateway multiplier sync account %d: minimum rate cannot exceed maximum rate", i+1)
+		}
+	}
+	if count == 0 {
+		return nil
+	}
+	if count > 1 {
+		return errors.New("only one gateway multiplier sync account is supported per sync group")
+	}
+	if s.gateway == nil {
+		return errors.New("gateway service is unavailable")
+	}
+	if strings.TrimSpace(s.gatewayBaseURL) == "" {
+		return errors.New("server.baseURL is required for gateway multiplier sync")
+	}
+	return nil
+}
+
+func (s *Service) ensureGatewayKeysForGroup(syncGroup *storage.UpstreamSyncGroup, accounts []storage.UpstreamSyncAccount) error {
+	for i := range accounts {
+		if !isGatewaySyncAccount(&accounts[i]) {
+			continue
+		}
+		_, _, err := s.ensureGatewayKey(syncGroup, &accounts[i], sourceAPIKeyName(syncGroup))
+		return err
+	}
+	return nil
+}
+
+func (s *Service) ensureGatewayKey(syncGroup *storage.UpstreamSyncGroup, syncAccount *storage.UpstreamSyncAccount, keyName string) (*connector.APIKey, string, error) {
+	if s.gateway == nil {
+		return nil, "", errors.New("gateway service is unavailable")
+	}
+	if syncAccount == nil || syncAccount.GatewayGroupID == nil || *syncAccount.GatewayGroupID == 0 {
+		return nil, "", errors.New("gateway group is required")
+	}
+	groupID := *syncAccount.GatewayGroupID
+	if _, err := s.gateway.GetGroup(groupID); err != nil {
+		return nil, "", fmt.Errorf("gateway group missing: %d", groupID)
+	}
+	keys, err := s.gateway.ListKeysByGroup(groupID)
+	if err != nil {
+		return nil, "", err
+	}
+	if mapped, err := s.managedAccounts.FindByAccountID(syncAccount.ID); err == nil && mapped != nil && mapped.SourceAPIKeyID > 0 {
+		for _, item := range keys {
+			if int64(item.ID) != mapped.SourceAPIKeyID {
+				continue
+			}
+			secret, revealErr := s.gateway.RevealKey(item.ID)
+			if revealErr != nil {
+				return nil, "", revealErr
+			}
+			return &connector.APIKey{ID: int64(item.ID), Name: item.Name}, secret, nil
+		}
+	}
+	for _, item := range keys {
+		if strings.TrimSpace(item.Name) != strings.TrimSpace(keyName) {
+			continue
+		}
+		secret, revealErr := s.gateway.RevealKey(item.ID)
+		if revealErr != nil {
+			return nil, "", revealErr
+		}
+		return &connector.APIKey{ID: int64(item.ID), Name: item.Name}, secret, nil
+	}
+	created, err := s.gateway.CreateKey(gateway.CreateKeyInput{GroupID: groupID, Name: strings.TrimSpace(keyName)})
+	if err != nil {
+		return nil, "", err
+	}
+	return &connector.APIKey{ID: int64(created.Key.ID), Name: created.Key.Name}, created.Secret, nil
+}
+
+func (s *Service) gatewayRateMultiplierForAccount(syncAccount *storage.UpstreamSyncAccount) (float64, error) {
+	if s.gateway == nil || syncAccount == nil || syncAccount.GatewayGroupID == nil || *syncAccount.GatewayGroupID == 0 {
+		return 0, errors.New("gateway group is required")
+	}
+	routes, err := s.gateway.ListRoutes(*syncAccount.GatewayGroupID)
+	if err != nil {
+		return 0, err
+	}
+	rates := make([]float64, 0, len(routes))
+	for _, route := range routes {
+		if route.Enabled && route.BillingRateMultiplier > 0 {
+			rates = append(rates, route.BillingRateMultiplier)
+		}
+	}
+	if len(rates) == 0 {
+		return 0, errors.New("gateway group has no enabled routes with a billing multiplier")
+	}
+	sort.Float64s(rates)
+	base := rates[len(rates)-1]
+	if normalizeGatewayRateMode(syncAccount.GatewayRateMode) == "min" {
+		base = rates[0]
+	}
+	computed := applyGatewayRateOperation(base, syncAccount.RateConvertMode, syncAccount.RateConvertValue)
+	return clampGatewayRate(computed, syncAccount.GatewayRateMin, syncAccount.GatewayRateMax), nil
+}
+
+func applyGatewayRateOperation(base float64, operation string, value float64) float64 {
+	switch strings.TrimSpace(operation) {
+	case "add":
+		return base + value
+	case "subtract":
+		return base - value
+	case "multiply":
+		return base * value
+	case "divide":
+		if value != 0 {
+			return base / value
+		}
+	}
+	return base
+}
+
+func clampGatewayRate(value, minValue, maxValue float64) float64 {
+	minValue = nonNegativeFloat(minValue)
+	maxValue = nonNegativeFloat(maxValue)
+	if minValue > 0 && value < minValue {
+		value = minValue
+	}
+	if maxValue > 0 && value > maxValue {
+		value = maxValue
+	}
+	return value
+}
+
+func nonNegativeFloat(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
 func managedObjectBaseName(syncGroup *storage.UpstreamSyncGroup, syncAccount *storage.UpstreamSyncAccount) string {
 	return fmt.Sprintf("%s-账号%d", syncGroup.Name, syncAccount.Position+1)
 }
 
 func managedObjectName(syncGroup *storage.UpstreamSyncGroup, syncAccount *storage.UpstreamSyncAccount, ch *storage.Channel) string {
+	return managedObjectNameForSource(syncGroup, syncAccount, ch.Name)
+}
+
+func managedObjectNameForSource(syncGroup *storage.UpstreamSyncGroup, syncAccount *storage.UpstreamSyncAccount, sourceName string) string {
 	base := managedObjectBaseName(syncGroup, syncAccount)
-	channelName := strings.TrimSpace(ch.Name)
-	if channelName == "" {
+	sourceName = strings.TrimSpace(sourceName)
+	if sourceName == "" {
 		return base
 	}
-	return fmt.Sprintf("%s [%s]", base, channelName)
+	return fmt.Sprintf("%s [%s]", base, sourceName)
 }
 
 func managedObjectMatchName(name string) string {
@@ -2341,9 +2587,14 @@ func accountItems(list []SyncAccountDTO) []storage.UpstreamSyncAccount {
 		out = append(out, storage.UpstreamSyncAccount{
 			ID:               item.ID,
 			Position:         i,
+			SourceKind:       normalizeSyncAccountSourceKind(item.SourceKind),
 			SourceChannelID:  item.SourceChannelID,
 			SourceGroupID:    item.SourceGroupID,
 			SourceGroupName:  strings.TrimSpace(item.SourceGroupName),
+			GatewayGroupID:   item.GatewayGroupID,
+			GatewayRateMode:  normalizeGatewayRateMode(item.GatewayRateMode),
+			GatewayRateMin:   nonNegativeFloat(item.GatewayRateMin),
+			GatewayRateMax:   nonNegativeFloat(item.GatewayRateMax),
 			ProxyID:          item.ProxyID,
 			Concurrency:      concurrency,
 			Weight:           weight,
@@ -2490,9 +2741,14 @@ func accountDTOs(list []storage.UpstreamSyncAccount) []SyncAccountDTO {
 	for _, item := range list {
 		out = append(out, SyncAccountDTO{
 			ID:               item.ID,
+			SourceKind:       normalizeSyncAccountSourceKind(item.SourceKind),
 			SourceChannelID:  item.SourceChannelID,
 			SourceGroupID:    item.SourceGroupID,
 			SourceGroupName:  item.SourceGroupName,
+			GatewayGroupID:   item.GatewayGroupID,
+			GatewayRateMode:  normalizeGatewayRateMode(item.GatewayRateMode),
+			GatewayRateMin:   item.GatewayRateMin,
+			GatewayRateMax:   item.GatewayRateMax,
 			ProxyID:          item.ProxyID,
 			Concurrency:      item.Concurrency,
 			Weight:           item.Weight,

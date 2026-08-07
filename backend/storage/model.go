@@ -367,12 +367,19 @@ func (UpstreamSyncGroup) TableName() string { return "upstream_sync_groups" }
 
 // UpstreamSyncAccount 是同步分组下的一条账号同步配置。
 type UpstreamSyncAccount struct {
-	ID               uint      `gorm:"primaryKey" json:"id"`
-	SyncGroupID      uint      `gorm:"not null;index" json:"sync_group_id"`
-	Position         int       `gorm:"not null;default:0" json:"position"`
+	ID          uint `gorm:"primaryKey" json:"id"`
+	SyncGroupID uint `gorm:"not null;index" json:"sync_group_id"`
+	Position    int  `gorm:"not null;default:0" json:"position"`
+	// SourceKind: channel | gateway_group. Empty values remain compatible with
+	// existing channel-based sync accounts.
+	SourceKind       string    `gorm:"size:32;not null;default:'channel'" json:"source_kind"`
 	SourceChannelID  uint      `gorm:"not null;index" json:"source_channel_id"`
 	SourceGroupID    *int64    `json:"source_group_id,omitempty"`
 	SourceGroupName  string    `gorm:"size:256;not null;default:''" json:"source_group_name,omitempty"`
+	GatewayGroupID   *uint     `gorm:"index" json:"gateway_group_id,omitempty"`
+	GatewayRateMode  string    `gorm:"size:16;not null;default:'max'" json:"gateway_rate_mode,omitempty"`
+	GatewayRateMin   float64   `gorm:"not null;default:0" json:"gateway_rate_min,omitempty"`
+	GatewayRateMax   float64   `gorm:"not null;default:0" json:"gateway_rate_max,omitempty"`
 	ProxyID          *int64    `json:"proxy_id,omitempty"`
 	Concurrency      int       `gorm:"default:10" json:"concurrency"`
 	Weight           int       `gorm:"default:1" json:"weight"`
@@ -435,18 +442,18 @@ const (
 	//   auto | openai_chat | openai_responses | anthropic
 	//   openai 为 openai_chat 的历史别名，读写时仍接受
 	GatewayUpstreamProtocolAuto            = "auto"
-	GatewayUpstreamProtocolOpenAI          = "openai"            // 兼容：等同 openai_chat
-	GatewayUpstreamProtocolOpenAIChat      = "openai_chat"       // /v1/chat/completions · messages
+	GatewayUpstreamProtocolOpenAI          = "openai"           // 兼容：等同 openai_chat
+	GatewayUpstreamProtocolOpenAIChat      = "openai_chat"      // /v1/chat/completions · messages
 	GatewayUpstreamProtocolOpenAIResponses = "openai_responses" // /v1/responses · input
-	GatewayUpstreamProtocolAnthropic       = "anthropic"         // /v1/messages
+	GatewayUpstreamProtocolAnthropic       = "anthropic"        // /v1/messages
 
 	// GatewayRoute 上游来源：监控渠道 vs 直连提供商（base+key）
 	GatewayRouteSourceMonitor  = "monitor"
 	GatewayRouteSourceProvider = "provider"
 
-	GatewayProviderAuthBearer = "bearer"
+	GatewayProviderAuthBearer  = "bearer"
 	GatewayProviderAuthXAPIKey = "x-api-key"
-	GatewayProviderAuthBoth   = "both"
+	GatewayProviderAuthBoth    = "both"
 
 	// 路由 User-Agent 策略（组级统一 UA + 路由三选一）：
 	//   passthrough — 透传客户端 UA（默认；模型测试/拉模型无客户端时不设 UA）
@@ -465,61 +472,61 @@ const (
 // 对齐 CLI Proxy openai-compatibility / api-key 形态，可与监控渠道在网关组内混用。
 // User-Agent 不在直连渠道配置：由网关组 + 路由 UA 策略统一决定。
 type GatewayProvider struct {
-	ID                  uint      `gorm:"primaryKey" json:"id"`
-	Name                string    `gorm:"size:128;not null;uniqueIndex" json:"name"`
-	BaseURL             string    `gorm:"size:512;not null" json:"base_url"`
-	APIKeyCipher        string    `gorm:"type:text;not null" json:"-"`
-	APIKeyHint          string    `gorm:"size:64;not null;default:''" json:"api_key_hint"`
-	UpstreamProtocol    string    `gorm:"size:16;not null;default:'auto'" json:"upstream_protocol"`
-	DefaultBillingRate  float64   `gorm:"not null;default:1" json:"default_billing_rate"`
-	AuthStyle           string    `gorm:"size:16;not null;default:'both'" json:"auth_style"`
-	Enabled             bool      `gorm:"not null;default:true;index" json:"enabled"`
+	ID                 uint    `gorm:"primaryKey" json:"id"`
+	Name               string  `gorm:"size:128;not null;uniqueIndex" json:"name"`
+	BaseURL            string  `gorm:"size:512;not null" json:"base_url"`
+	APIKeyCipher       string  `gorm:"type:text;not null" json:"-"`
+	APIKeyHint         string  `gorm:"size:64;not null;default:''" json:"api_key_hint"`
+	UpstreamProtocol   string  `gorm:"size:16;not null;default:'auto'" json:"upstream_protocol"`
+	DefaultBillingRate float64 `gorm:"not null;default:1" json:"default_billing_rate"`
+	AuthStyle          string  `gorm:"size:16;not null;default:'both'" json:"auth_style"`
+	Enabled            bool    `gorm:"not null;default:true;index" json:"enabled"`
 	// ProxyEnabled 与监控渠道一致：全局代理开启且本开关打开时，转发走系统代理配置。
-	ProxyEnabled        bool      `gorm:"not null;default:false" json:"proxy_enabled"`
-	ExtraHeadersJSON    string    `gorm:"type:text" json:"extra_headers,omitempty"`
-	Notes               string    `gorm:"size:512;not null;default:''" json:"notes,omitempty"`
-	CreatedAt           time.Time `json:"created_at"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	ProxyEnabled     bool      `gorm:"not null;default:false" json:"proxy_enabled"`
+	ExtraHeadersJSON string    `gorm:"type:text" json:"extra_headers,omitempty"`
+	Notes            string    `gorm:"size:512;not null;default:''" json:"notes,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 func (GatewayProvider) TableName() string { return "gateway_providers" }
 
 // GatewayGroup 是网关配置单元：路由、模型映射、模型列表归属组；组内可有多把密钥。
 type GatewayGroup struct {
-	ID                uint      `gorm:"primaryKey" json:"id"`
-	Name              string    `gorm:"size:128;not null;uniqueIndex" json:"name"`
-	Description       string    `gorm:"size:512;not null;default:''" json:"description,omitempty"`
+	ID          uint   `gorm:"primaryKey" json:"id"`
+	Name        string `gorm:"size:128;not null;uniqueIndex" json:"name"`
+	Description string `gorm:"size:512;not null;default:''" json:"description,omitempty"`
 	// Position 侧栏展示与管理端列表顺序（越小越靠前）；新建组追加到末尾。
-	Position          int       `gorm:"not null;default:0;index" json:"position"`
-	Status            string    `gorm:"size:16;not null;default:'active';index" json:"status"`
-	RateSortDirection string    `gorm:"size:16;not null;default:'asc'" json:"rate_sort_direction"`
+	Position          int    `gorm:"not null;default:0;index" json:"position"`
+	Status            string `gorm:"size:16;not null;default:'active';index" json:"status"`
+	RateSortDirection string `gorm:"size:16;not null;default:'asc'" json:"rate_sort_direction"`
 	// RateResortEnabled 渠道分组价格倍率重排：开启后，倍率扫描结束时按源分组实时倍率
 	// 重写路由 position 与 billing_rate_multiplier（对齐上游同步账号 Apply 逻辑）。
 	// 关闭时仅在保存路由 / 改排序方向时落库顺序；运行时仍按实时倍率 SortRoutes。
-	RateResortEnabled bool `gorm:"not null;default:false" json:"rate_resort_enabled"`
-	ModelMappingJSON  string    `gorm:"type:text" json:"model_mapping,omitempty"`
-	ModelsJSON        string    `gorm:"type:text" json:"models_json,omitempty"`
-	ModelsMode        string    `gorm:"size:16;not null;default:'auto'" json:"models_mode"`
+	RateResortEnabled bool   `gorm:"not null;default:false" json:"rate_resort_enabled"`
+	ModelMappingJSON  string `gorm:"type:text" json:"model_mapping,omitempty"`
+	ModelsJSON        string `gorm:"type:text" json:"models_json,omitempty"`
+	ModelsMode        string `gorm:"size:16;not null;default:'auto'" json:"models_mode"`
 	// 重试 / 顺延 / 冷却（组级策略）
 	// RetryEnabled=false：上游失败直接回显，不重试、不顺延
-	RetryEnabled      bool      `gorm:"not null;default:true" json:"retry_enabled"`
+	RetryEnabled bool `gorm:"not null;default:true" json:"retry_enabled"`
 	// 同一路由额外重试次数（不含首次；0=每条路由只打一次）
-	RetryCount        int       `gorm:"not null;default:0" json:"retry_count"`
+	RetryCount int `gorm:"not null;default:0" json:"retry_count"`
 	// 是否顺延到下一条路由
-	FailoverEnabled   bool      `gorm:"not null;default:true" json:"failover_enabled"`
+	FailoverEnabled bool `gorm:"not null;default:true" json:"failover_enabled"`
 	// 顺延次数：在首条路由耗尽后，最多再换几条路由
-	FailoverMax       int       `gorm:"not null;default:8" json:"failover_max"`
+	FailoverMax int `gorm:"not null;default:8" json:"failover_max"`
 	// FailoverOn4xx：是否将上游 4xx（含 400/401/403/404 等；429 始终可顺延）纳入重试/顺延。
 	// 默认 false：仅网络错误、429、5xx 会重试/顺延；其它 4xx 直接回显。
 	FailoverOn4xx bool `gorm:"not null;default:false" json:"failover_on_4xx"`
 	// 失败后临时冷却秒数（0=不冷却）；恢复后可再参与调度
-	CooldownSeconds    int       `gorm:"not null;default:30" json:"cooldown_seconds"`
+	CooldownSeconds int `gorm:"not null;default:30" json:"cooldown_seconds"`
 	// 首字/首字节超时（秒）：0=关闭；>0 时等待首字节超过该时间则主动断开并走重试/顺延。
 	// 可能造成上游已计费但客户端未收完，从而重复请求增加费用。
 	FirstTokenTimeoutSec int `gorm:"not null;default:0" json:"first_token_timeout_sec"`
 	// UserAgent 组级统一 User-Agent。路由 mode=group 时使用；留空表示组未配置。
 	// 不用 omitempty：空串也要返回，前端编辑回填才能区分「未配置」与「字段缺失」。
-	UserAgent string `gorm:"size:512;not null;default:''" json:"user_agent"`
+	UserAgent string    `gorm:"size:512;not null;default:''" json:"user_agent"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -548,39 +555,39 @@ func (GatewayKey) TableName() string { return "gateway_keys" }
 
 // GatewayRoute 是网关组绑定的一条上游路由（监控渠道或直连 Provider）。
 type GatewayRoute struct {
-	ID                      uint       `gorm:"primaryKey" json:"id"`
-	GatewayGroupID          uint       `gorm:"not null;index;uniqueIndex:idx_gateway_route_group_pos" json:"gateway_group_id"`
-	Position                int        `gorm:"not null;default:0;uniqueIndex:idx_gateway_route_group_pos" json:"position"`
+	ID             uint `gorm:"primaryKey" json:"id"`
+	GatewayGroupID uint `gorm:"not null;index;uniqueIndex:idx_gateway_route_group_pos" json:"gateway_group_id"`
+	Position       int  `gorm:"not null;default:0;uniqueIndex:idx_gateway_route_group_pos" json:"position"`
 	// SourceKind: monitor | provider；空视为 monitor（兼容旧数据）
-	SourceKind              string     `gorm:"size:16;not null;default:'monitor';index" json:"source_kind"`
-	SourceChannelID         uint       `gorm:"not null;index;default:0" json:"source_channel_id"`
-	GatewayProviderID       uint       `gorm:"not null;index;default:0" json:"gateway_provider_id"`
-	SourceGroupID           *int64     `json:"source_group_id,omitempty"`
-	SourceGroupName         string     `gorm:"size:256;not null;default:''" json:"source_group_name,omitempty"`
-	Weight                  int        `gorm:"default:1" json:"weight"`
-	RateConvertMode         string     `gorm:"size:32;not null;default:'raw'" json:"rate_convert_mode"`
-	RateConvertValue        float64    `gorm:"default:1" json:"rate_convert_value"`
-	BillingRateMultiplier   float64    `gorm:"not null;default:1" json:"billing_rate_multiplier"`
-	Enabled                 bool       `gorm:"default:true" json:"enabled"`
-	ModelMappingJSON        string     `gorm:"type:text" json:"model_mapping,omitempty"`
-	UpstreamProtocol        string     `gorm:"size:16;not null;default:'auto'" json:"upstream_protocol"`
-	Concurrency             int        `gorm:"default:10" json:"concurrency"`
+	SourceKind            string  `gorm:"size:16;not null;default:'monitor';index" json:"source_kind"`
+	SourceChannelID       uint    `gorm:"not null;index;default:0" json:"source_channel_id"`
+	GatewayProviderID     uint    `gorm:"not null;index;default:0" json:"gateway_provider_id"`
+	SourceGroupID         *int64  `json:"source_group_id,omitempty"`
+	SourceGroupName       string  `gorm:"size:256;not null;default:''" json:"source_group_name,omitempty"`
+	Weight                int     `gorm:"default:1" json:"weight"`
+	RateConvertMode       string  `gorm:"size:32;not null;default:'raw'" json:"rate_convert_mode"`
+	RateConvertValue      float64 `gorm:"default:1" json:"rate_convert_value"`
+	BillingRateMultiplier float64 `gorm:"not null;default:1" json:"billing_rate_multiplier"`
+	Enabled               bool    `gorm:"default:true" json:"enabled"`
+	ModelMappingJSON      string  `gorm:"type:text" json:"model_mapping,omitempty"`
+	UpstreamProtocol      string  `gorm:"size:16;not null;default:'auto'" json:"upstream_protocol"`
+	Concurrency           int     `gorm:"default:10" json:"concurrency"`
 	// UserAgentMode: passthrough | group | custom（见 GatewayUserAgentMode*）
-	UserAgentMode   string `gorm:"size:16;not null;default:'passthrough'" json:"user_agent_mode"`
+	UserAgentMode string `gorm:"size:16;not null;default:'passthrough'" json:"user_agent_mode"`
 	// UserAgentCustom 仅 mode=custom 时生效；转发/模型测试/拉模型共用。
 	// 不用 omitempty：空串也要返回，前端编辑回填才能区分。
-	UserAgentCustom string `gorm:"size:512;not null;default:''" json:"user_agent_custom"`
+	UserAgentCustom         string     `gorm:"size:512;not null;default:''" json:"user_agent_custom"`
 	SourceAPIKeyID          int64      `gorm:"not null;default:0" json:"source_api_key_id"`
 	SourceAPIKeyName        string     `gorm:"size:256;not null;default:''" json:"source_api_key_name"`
 	SourceAPIKeyCipher      string     `gorm:"type:text" json:"-"`
-	TempUnschedulableUntil     *time.Time `json:"temp_unschedulable_until,omitempty"`
-	TempUnschedulableReason    string     `gorm:"type:text" json:"temp_unschedulable_reason,omitempty"`
+	TempUnschedulableUntil  *time.Time `json:"temp_unschedulable_until,omitempty"`
+	TempUnschedulableReason string     `gorm:"type:text" json:"temp_unschedulable_reason,omitempty"`
 	// TempUnschedulableAt / TempUnschedulableRequestID：最近一次触发暂停的失败请求时间与网关 request_id
 	// （保留至手动清除、连续成功自动清除，或下次失败覆盖）
 	TempUnschedulableAt        *time.Time `json:"temp_unschedulable_at,omitempty"`
 	TempUnschedulableRequestID string     `gorm:"size:64;not null;default:''" json:"temp_unschedulable_request_id,omitempty"`
 	// RecoverSuccessStreak：失败残留信息存在期间的连续成功次数；达到阈值后自动清空错误展示
-	RecoverSuccessStreak int `gorm:"not null;default:0" json:"recover_success_streak,omitempty"`
+	RecoverSuccessStreak int       `gorm:"not null;default:0" json:"recover_success_streak,omitempty"`
 	CreatedAt            time.Time `json:"created_at"`
 	UpdatedAt            time.Time `json:"updated_at"`
 }
@@ -609,89 +616,89 @@ func (GatewayRoute) TableName() string { return "gateway_routes" }
 // GatewayUsageLog 记录每一次网关转发请求的用量与费用参考。
 // Source* 字段为请求当时的路由快照：路由保存会换 id 时，历史记录仍可展示上游密钥/源分组。
 type GatewayUsageLog struct {
-	ID                      uint      `gorm:"primaryKey" json:"id"`
-	GatewayGroupID          uint      `gorm:"not null;index;default:0" json:"gateway_group_id"`
-	GatewayKeyID            uint      `gorm:"not null;index" json:"gateway_key_id"`
-	RouteID                 uint      `gorm:"not null;index" json:"route_id"`
-	ChannelID               uint      `gorm:"not null;index;default:0" json:"channel_id"`
-	GatewayProviderID       uint      `gorm:"not null;index;default:0" json:"gateway_provider_id"`
+	ID                uint `gorm:"primaryKey" json:"id"`
+	GatewayGroupID    uint `gorm:"not null;index;default:0" json:"gateway_group_id"`
+	GatewayKeyID      uint `gorm:"not null;index" json:"gateway_key_id"`
+	RouteID           uint `gorm:"not null;index" json:"route_id"`
+	ChannelID         uint `gorm:"not null;index;default:0" json:"channel_id"`
+	GatewayProviderID uint `gorm:"not null;index;default:0" json:"gateway_provider_id"`
 	// 路由快照（写入时固化，不依赖 route 表存活）
-	ProviderName            string    `gorm:"size:128;not null;default:''" json:"provider_name,omitempty"`
-	SourceAPIKeyID          int64     `gorm:"not null;default:0" json:"source_api_key_id,omitempty"`
-	SourceAPIKeyName        string    `gorm:"size:256;not null;default:''" json:"source_api_key_name,omitempty"`
-	SourceGroupID           *int64    `json:"source_group_id,omitempty"`
-	SourceGroupName         string    `gorm:"size:256;not null;default:''" json:"source_group_name,omitempty"`
-	RequestID               string    `gorm:"size:64;not null;index" json:"request_id"`
+	ProviderName     string `gorm:"size:128;not null;default:''" json:"provider_name,omitempty"`
+	SourceAPIKeyID   int64  `gorm:"not null;default:0" json:"source_api_key_id,omitempty"`
+	SourceAPIKeyName string `gorm:"size:256;not null;default:''" json:"source_api_key_name,omitempty"`
+	SourceGroupID    *int64 `json:"source_group_id,omitempty"`
+	SourceGroupName  string `gorm:"size:256;not null;default:''" json:"source_group_name,omitempty"`
+	RequestID        string `gorm:"size:64;not null;index" json:"request_id"`
 	// 同一 RequestID 下的尝试序号（从 1 起）；用于使用记录关联
-	Attempt                 int       `gorm:"not null;default:1;index" json:"attempt"`
+	Attempt int `gorm:"not null;default:1;index" json:"attempt"`
 	// primary | retry | failover
-	AttemptKind             string    `gorm:"size:16;not null;default:'primary'" json:"attempt_kind,omitempty"`
+	AttemptKind string `gorm:"size:16;not null;default:'primary'" json:"attempt_kind,omitempty"`
 	// 本条失败后写入的冷却截止（若有），便于日志展示
-	CooldownUntil           *time.Time `json:"cooldown_until,omitempty"`
-	RequestedModel          string    `gorm:"size:256;not null;index" json:"requested_model"`
-	UpstreamModel           string    `gorm:"size:256" json:"upstream_model,omitempty"`
-	ModelMappingChain       string    `gorm:"size:512" json:"model_mapping_chain,omitempty"`
-	InboundEndpoint         string    `gorm:"size:128" json:"inbound_endpoint,omitempty"`
-	UpstreamEndpoint        string    `gorm:"size:128" json:"upstream_endpoint,omitempty"`
-	InboundProtocol         string    `gorm:"size:16" json:"inbound_protocol,omitempty"`
-	UpstreamProtocol        string    `gorm:"size:16" json:"upstream_protocol,omitempty"`
-	ProtocolConverted       bool      `gorm:"not null;default:false" json:"protocol_converted"`
-	RequestType             int       `gorm:"not null;default:0;index" json:"request_type"`
-	ServiceTier             string    `gorm:"size:64" json:"service_tier,omitempty"`
-	ReasoningEffort         string    `gorm:"size:32" json:"reasoning_effort,omitempty"`
-	BillingMode             string    `gorm:"size:32;not null;default:'token'" json:"billing_mode"`
+	CooldownUntil     *time.Time `json:"cooldown_until,omitempty"`
+	RequestedModel    string     `gorm:"size:256;not null;index" json:"requested_model"`
+	UpstreamModel     string     `gorm:"size:256" json:"upstream_model,omitempty"`
+	ModelMappingChain string     `gorm:"size:512" json:"model_mapping_chain,omitempty"`
+	InboundEndpoint   string     `gorm:"size:128" json:"inbound_endpoint,omitempty"`
+	UpstreamEndpoint  string     `gorm:"size:128" json:"upstream_endpoint,omitempty"`
+	InboundProtocol   string     `gorm:"size:16" json:"inbound_protocol,omitempty"`
+	UpstreamProtocol  string     `gorm:"size:16" json:"upstream_protocol,omitempty"`
+	ProtocolConverted bool       `gorm:"not null;default:false" json:"protocol_converted"`
+	RequestType       int        `gorm:"not null;default:0;index" json:"request_type"`
+	ServiceTier       string     `gorm:"size:64" json:"service_tier,omitempty"`
+	ReasoningEffort   string     `gorm:"size:32" json:"reasoning_effort,omitempty"`
+	BillingMode       string     `gorm:"size:32;not null;default:'token'" json:"billing_mode"`
 	// Token 互斥桶（对齐 sub2api）：
 	// InputTokens = 不含缓存的「新鲜输入」；CacheRead/Creation 单独计
-	InputTokens             int       `gorm:"not null;default:0" json:"input_tokens"`
-	OutputTokens            int       `gorm:"not null;default:0" json:"output_tokens"`
-	CacheCreationTokens     int       `gorm:"not null;default:0" json:"cache_creation_tokens"`
-	CacheReadTokens         int       `gorm:"not null;default:0" json:"cache_read_tokens"`
-	CacheCreation5mTokens   int       `gorm:"not null;default:0" json:"cache_creation_5m_tokens"`
-	CacheCreation1hTokens   int       `gorm:"not null;default:0" json:"cache_creation_1h_tokens"`
-	ImageOutputTokens       int       `gorm:"not null;default:0" json:"image_output_tokens"`
+	InputTokens           int `gorm:"not null;default:0" json:"input_tokens"`
+	OutputTokens          int `gorm:"not null;default:0" json:"output_tokens"`
+	CacheCreationTokens   int `gorm:"not null;default:0" json:"cache_creation_tokens"`
+	CacheReadTokens       int `gorm:"not null;default:0" json:"cache_read_tokens"`
+	CacheCreation5mTokens int `gorm:"not null;default:0" json:"cache_creation_5m_tokens"`
+	CacheCreation1hTokens int `gorm:"not null;default:0" json:"cache_creation_1h_tokens"`
+	ImageOutputTokens     int `gorm:"not null;default:0" json:"image_output_tokens"`
 	// 推理 token（completion_tokens_details.reasoning_tokens），展示用，费用含在 output 单价内
-	ReasoningTokens         int       `gorm:"not null;default:0" json:"reasoning_tokens"`
-	InputCost               float64   `gorm:"not null;default:0" json:"input_cost"`
-	OutputCost              float64   `gorm:"not null;default:0" json:"output_cost"`
-	CacheCreationCost       float64   `gorm:"not null;default:0" json:"cache_creation_cost"`
-	CacheReadCost           float64   `gorm:"not null;default:0" json:"cache_read_cost"`
-	ImageOutputCost         float64   `gorm:"not null;default:0" json:"image_output_cost"`
-	TotalCost               float64   `gorm:"not null;default:0" json:"total_cost"`
-	ActualCost              float64   `gorm:"not null;default:0" json:"actual_cost"`
-	AccountStatsCost        float64   `gorm:"not null;default:0" json:"account_stats_cost"`
-	RateMultiplier          float64   `gorm:"not null;default:1" json:"rate_multiplier"`
-	BillingRateMultiplier   float64   `gorm:"not null;default:1" json:"billing_rate_multiplier"`
-	AccountRateMultiplier   float64   `gorm:"not null;default:1" json:"account_rate_multiplier"`
-	Stream                  bool      `gorm:"not null;default:false" json:"stream"`
-	StatusCode              int       `gorm:"not null;default:0" json:"status_code"`
-	Success                 bool      `gorm:"not null;default:false;index" json:"success"`
+	ReasoningTokens       int     `gorm:"not null;default:0" json:"reasoning_tokens"`
+	InputCost             float64 `gorm:"not null;default:0" json:"input_cost"`
+	OutputCost            float64 `gorm:"not null;default:0" json:"output_cost"`
+	CacheCreationCost     float64 `gorm:"not null;default:0" json:"cache_creation_cost"`
+	CacheReadCost         float64 `gorm:"not null;default:0" json:"cache_read_cost"`
+	ImageOutputCost       float64 `gorm:"not null;default:0" json:"image_output_cost"`
+	TotalCost             float64 `gorm:"not null;default:0" json:"total_cost"`
+	ActualCost            float64 `gorm:"not null;default:0" json:"actual_cost"`
+	AccountStatsCost      float64 `gorm:"not null;default:0" json:"account_stats_cost"`
+	RateMultiplier        float64 `gorm:"not null;default:1" json:"rate_multiplier"`
+	BillingRateMultiplier float64 `gorm:"not null;default:1" json:"billing_rate_multiplier"`
+	AccountRateMultiplier float64 `gorm:"not null;default:1" json:"account_rate_multiplier"`
+	Stream                bool    `gorm:"not null;default:false" json:"stream"`
+	StatusCode            int     `gorm:"not null;default:0" json:"status_code"`
+	Success               bool    `gorm:"not null;default:false;index" json:"success"`
 	// ErrorMessage 短摘要（列表/告警）；ErrorDetail / UpstreamErrorBody 供 debug 追踪
-	ErrorMessage            string    `gorm:"type:text" json:"error_message,omitempty"`
-	ErrorType               string    `gorm:"size:32;not null;default:'';index" json:"error_type,omitempty"` // transport|http|config|internal
-	ErrorDetail             string    `gorm:"type:text" json:"error_detail,omitempty"`
-	UpstreamURL             string    `gorm:"size:512" json:"upstream_url,omitempty"`
-	UpstreamErrorBody       string    `gorm:"type:text" json:"upstream_error_body,omitempty"`
-	UpstreamErrorHeaders    string    `gorm:"type:text" json:"upstream_error_headers,omitempty"`
-	DurationMS              int64     `gorm:"not null;default:0" json:"duration_ms"`
-	FirstTokenMS            *int64    `json:"first_token_ms,omitempty"`
-	IPAddress               string    `gorm:"size:64" json:"ip_address,omitempty"`
-	UserAgent               string    `gorm:"size:512" json:"user_agent,omitempty"`
-	CreatedAt               time.Time `gorm:"not null;index" json:"created_at"`
+	ErrorMessage         string    `gorm:"type:text" json:"error_message,omitempty"`
+	ErrorType            string    `gorm:"size:32;not null;default:'';index" json:"error_type,omitempty"` // transport|http|config|internal
+	ErrorDetail          string    `gorm:"type:text" json:"error_detail,omitempty"`
+	UpstreamURL          string    `gorm:"size:512" json:"upstream_url,omitempty"`
+	UpstreamErrorBody    string    `gorm:"type:text" json:"upstream_error_body,omitempty"`
+	UpstreamErrorHeaders string    `gorm:"type:text" json:"upstream_error_headers,omitempty"`
+	DurationMS           int64     `gorm:"not null;default:0" json:"duration_ms"`
+	FirstTokenMS         *int64    `json:"first_token_ms,omitempty"`
+	IPAddress            string    `gorm:"size:64" json:"ip_address,omitempty"`
+	UserAgent            string    `gorm:"size:512" json:"user_agent,omitempty"`
+	CreatedAt            time.Time `gorm:"not null;index" json:"created_at"`
 }
 
 func (GatewayUsageLog) TableName() string { return "gateway_usage_logs" }
 
 // ModelPriceOverride 覆盖内置模型单价（per-token，USD）。
 type ModelPriceOverride struct {
-	ID                           uint      `gorm:"primaryKey" json:"id"`
-	ModelName                    string    `gorm:"size:256;not null;uniqueIndex" json:"model_name"`
-	InputPricePerToken           float64   `gorm:"not null;default:0" json:"input_price_per_token"`
-	OutputPricePerToken          float64   `gorm:"not null;default:0" json:"output_price_per_token"`
-	CacheCreationPricePerToken   float64   `gorm:"not null;default:0" json:"cache_creation_price_per_token"`
-	CacheReadPricePerToken       float64   `gorm:"not null;default:0" json:"cache_read_price_per_token"`
-	Enabled                      bool      `gorm:"default:true" json:"enabled"`
-	CreatedAt                    time.Time `json:"created_at"`
-	UpdatedAt                    time.Time `json:"updated_at"`
+	ID                         uint      `gorm:"primaryKey" json:"id"`
+	ModelName                  string    `gorm:"size:256;not null;uniqueIndex" json:"model_name"`
+	InputPricePerToken         float64   `gorm:"not null;default:0" json:"input_price_per_token"`
+	OutputPricePerToken        float64   `gorm:"not null;default:0" json:"output_price_per_token"`
+	CacheCreationPricePerToken float64   `gorm:"not null;default:0" json:"cache_creation_price_per_token"`
+	CacheReadPricePerToken     float64   `gorm:"not null;default:0" json:"cache_read_price_per_token"`
+	Enabled                    bool      `gorm:"default:true" json:"enabled"`
+	CreatedAt                  time.Time `json:"created_at"`
+	UpdatedAt                  time.Time `json:"updated_at"`
 }
 
 func (ModelPriceOverride) TableName() string { return "model_price_overrides" }

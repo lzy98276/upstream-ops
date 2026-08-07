@@ -75,6 +75,8 @@ import { formatRatio, relativeTime } from "@/lib/format";
 import { useChannels } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import type {
+  GatewayGroup,
+  GatewayRoute,
   RateSnapshot,
   UpstreamSyncLog,
   UpstreamSyncLogPage,
@@ -110,14 +112,20 @@ interface SyncGroupForm {
   custom_error_codes: string;
   rate_sort_direction: "asc" | "desc";
   accounts: SyncAccountForm[];
+  gateway_rate_sync: SyncAccountForm | null;
   enabled: boolean;
 }
 
 interface SyncAccountForm {
   id?: number;
+  source_kind: "channel" | "gateway_group";
   source_channel_id: number;
   source_group_id: string;
   source_group_name: string;
+  gateway_group_id: string;
+  gateway_rate_mode: "max" | "min";
+  gateway_rate_min: number;
+  gateway_rate_max: number;
   proxy_id: string;
   concurrency: number;
   weight: number;
@@ -150,13 +158,19 @@ const emptySyncGroupForm: SyncGroupForm = {
   custom_error_codes: "",
   rate_sort_direction: "asc",
   accounts: [],
+  gateway_rate_sync: null,
   enabled: true,
 };
 
 const emptySyncAccountForm: SyncAccountForm = {
+  source_kind: "channel",
   source_channel_id: 0,
   source_group_id: "",
   source_group_name: "",
+  gateway_group_id: "",
+  gateway_rate_mode: "max",
+  gateway_rate_min: 0,
+  gateway_rate_max: 0,
   proxy_id: "",
   concurrency: 10,
   weight: 1,
@@ -165,6 +179,13 @@ const emptySyncAccountForm: SyncAccountForm = {
   enabled: true,
   test_enabled: false,
   test_model: "",
+};
+
+const emptyGatewayRateSyncForm: SyncAccountForm = {
+  ...emptySyncAccountForm,
+  source_kind: "gateway_group",
+  rate_convert_mode: "multiply",
+  rate_convert_value: 1,
 };
 
 const syncPlatformOptions = [
@@ -201,10 +222,16 @@ function platformLabel(value?: string) {
 function accountToForm(account: UpstreamSyncAccount): SyncAccountForm {
   return {
     id: account.id,
+    source_kind: account.source_kind === "gateway_group" ? "gateway_group" : "channel",
     source_channel_id: account.source_channel_id,
     source_group_id:
       account.source_group_id == null ? "" : String(account.source_group_id),
     source_group_name: account.source_group_name ?? "",
+    gateway_group_id:
+      account.gateway_group_id == null ? "" : String(account.gateway_group_id),
+    gateway_rate_mode: account.gateway_rate_mode === "min" ? "min" : "max",
+    gateway_rate_min: account.gateway_rate_min ?? 0,
+    gateway_rate_max: account.gateway_rate_max ?? 0,
     proxy_id: account.proxy_id == null ? "" : String(account.proxy_id),
     concurrency: account.concurrency || 10,
     weight: account.weight || 1,
@@ -213,6 +240,35 @@ function accountToForm(account: UpstreamSyncAccount): SyncAccountForm {
     enabled: account.enabled,
     test_enabled: account.test_enabled ?? false,
     test_model: account.test_model ?? "",
+  };
+}
+
+function syncAccountPayload(account: SyncAccountForm) {
+  const isGatewayRateSync = account.source_kind === "gateway_group";
+  return {
+    ...account,
+    source_kind: account.source_kind,
+    source_channel_id: isGatewayRateSync ? 0 : account.source_channel_id,
+    source_group_id:
+      !isGatewayRateSync && account.source_group_id
+        ? Number(account.source_group_id)
+        : null,
+    source_group_name: isGatewayRateSync
+      ? ""
+      : account.source_group_name.trim(),
+    gateway_group_id:
+      isGatewayRateSync && account.gateway_group_id
+        ? Number(account.gateway_group_id)
+        : null,
+    gateway_rate_min: Math.max(0, account.gateway_rate_min || 0),
+    gateway_rate_max: Math.max(0, account.gateway_rate_max || 0),
+    proxy_id: isGatewayRateSync
+      ? null
+      : account.proxy_id
+        ? Number(account.proxy_id)
+        : null,
+    test_enabled: isGatewayRateSync ? false : account.test_enabled,
+    test_model: isGatewayRateSync ? "" : account.test_model.trim(),
   };
 }
 
@@ -718,6 +774,10 @@ export function UpstreamSyncSettings() {
   }
 
   function syncGroupToForm(syncGroup: UpstreamSyncGroup): SyncGroupForm {
+    const allAccounts = syncGroup.accounts?.map(accountToForm) ?? [];
+    const gatewayRateSync =
+      allAccounts.find((account) => account.source_kind === "gateway_group") ??
+      null;
     return {
       id: syncGroup.id,
       display_name: syncGroup.display_name || syncGroup.name,
@@ -738,9 +798,11 @@ export function UpstreamSyncSettings() {
       custom_error_codes: syncGroup.custom_error_codes ?? "",
       rate_sort_direction: syncGroup.rate_sort_direction || "asc",
       accounts:
-        syncGroup.accounts?.length > 0
-          ? syncGroup.accounts.map(accountToForm)
+        allAccounts.filter((account) => account.source_kind !== "gateway_group")
+          .length > 0
+          ? allAccounts.filter((account) => account.source_kind !== "gateway_group")
           : [{ ...emptySyncAccountForm }],
+      gateway_rate_sync: gatewayRateSync,
       enabled: syncGroup.enabled ?? true,
     };
   }
@@ -760,15 +822,12 @@ export function UpstreamSyncSettings() {
         syncGroupForm.model_limits_mode === "custom"
           ? normalizeModelInput(syncGroupForm.model_limits)
           : "",
-      accounts: sortedAccounts.map(({ account }) => ({
-        ...account,
-        source_group_id: account.source_group_id
-          ? Number(account.source_group_id)
-          : null,
-        source_group_name: account.source_group_name.trim(),
-        proxy_id: account.proxy_id ? Number(account.proxy_id) : null,
-        test_model: account.test_model.trim(),
-      })),
+      accounts: [
+        ...sortedAccounts.map(({ account }) => syncAccountPayload(account)),
+        ...(syncGroupForm.gateway_rate_sync
+          ? [syncAccountPayload(syncGroupForm.gateway_rate_sync)]
+          : []),
+      ],
     };
   }
 
@@ -781,6 +840,23 @@ export function UpstreamSyncSettings() {
       );
       if (missingChannelIndex >= 0) {
         toast.error(`同步账号${missingChannelIndex + 1}未选择源渠道`);
+        return;
+      }
+      if (
+        syncGroupForm.gateway_rate_sync &&
+        !syncGroupForm.gateway_rate_sync.gateway_group_id
+      ) {
+        toast.error("倍率同步未选择网关");
+        return;
+      }
+      if (
+        syncGroupForm.gateway_rate_sync &&
+        syncGroupForm.gateway_rate_sync.gateway_rate_min > 0 &&
+        syncGroupForm.gateway_rate_sync.gateway_rate_max > 0 &&
+        syncGroupForm.gateway_rate_sync.gateway_rate_min >
+          syncGroupForm.gateway_rate_sync.gateway_rate_max
+      ) {
+        toast.error("最低调整倍率不能大于最高调整倍率");
         return;
       }
       const path = syncGroupForm.id
@@ -2142,6 +2218,8 @@ function SyncGroupFormView({
         </div>
       </section>
 
+      <GatewayRateSyncCard syncGroupForm={syncGroupForm} onChange={onChange} />
+
       <DialogFooter className="sticky bottom-0 -mx-3 border-t bg-background/95 px-3 pt-3 backdrop-blur sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:px-0 sm:pt-0">
         <Button variant="outline" className="w-full sm:w-auto" onClick={onCancel}>
           取消
@@ -2156,6 +2234,365 @@ function SyncGroupFormView({
       </DialogFooter>
     </div>
   );
+}
+
+function GatewayRateSyncCard({
+  syncGroupForm,
+  onChange,
+}: {
+  syncGroupForm: SyncGroupForm;
+  onChange: React.Dispatch<React.SetStateAction<SyncGroupForm>>;
+}) {
+  const [gatewayGroups, setGatewayGroups] = useState<GatewayGroup[]>([]);
+  const [gatewayRoutes, setGatewayRoutes] = useState<GatewayRoute[]>([]);
+  const [groupsLoading, setGroupsLoading] = useState(false);
+  const [routesLoading, setRoutesLoading] = useState(false);
+  const rateSync = syncGroupForm.gateway_rate_sync;
+  const gatewayGroupID = Number(rateSync?.gateway_group_id || 0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setGroupsLoading(true);
+    apiFetch<{ items: GatewayGroup[] }>("/gateway/groups")
+      .then((res) => {
+        if (!cancelled) setGatewayGroups(res.items ?? []);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          toast.error(err instanceof Error ? err.message : "加载网关组失败");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setGroupsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!gatewayGroupID) {
+      setGatewayRoutes([]);
+      return;
+    }
+    let cancelled = false;
+    setRoutesLoading(true);
+    apiFetch<{ items: GatewayRoute[] }>(
+      `/gateway/groups/${gatewayGroupID}/routes`,
+    )
+      .then((res) => {
+        if (!cancelled) setGatewayRoutes(res.items ?? []);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          toast.error(err instanceof Error ? err.message : "加载网关路由失败");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setRoutesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [gatewayGroupID]);
+
+  const rateRange = useMemo(() => {
+    const rates = gatewayRoutes
+      .filter((route) => route.enabled && route.billing_rate_multiplier > 0)
+      .map((route) => route.billing_rate_multiplier)
+      .sort((a, b) => a - b);
+    return {
+      min: rates[0] ?? 0,
+      max: rates[rates.length - 1] ?? 0,
+    };
+  }, [gatewayRoutes]);
+
+  function setRateSync(patch: Partial<SyncAccountForm>) {
+    onChange((prev) => ({
+      ...prev,
+      gateway_rate_sync: {
+        ...(prev.gateway_rate_sync ?? emptyGatewayRateSyncForm),
+        ...patch,
+      },
+    }));
+  }
+
+  const selectedBaseRate =
+    rateSync?.gateway_rate_mode === "min" ? rateRange.min : rateRange.max;
+  const calculatedRate = rateSync
+    ? clampGatewayRate(
+        applyGatewayRateOperation(
+          selectedBaseRate,
+          rateSync.rate_convert_mode,
+          rateSync.rate_convert_value,
+        ),
+        rateSync.gateway_rate_min,
+        rateSync.gateway_rate_max,
+      )
+    : 0;
+  const rateVariable =
+    rateSync?.gateway_rate_mode === "min"
+      ? "{网关组最低倍率}"
+      : "{网关组最高倍率}";
+
+  return (
+    <section className="rounded-xl border border-border bg-background/80 p-3 sm:p-4">
+      <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <p className="text-sm font-semibold text-foreground">倍率同步</p>
+        {rateSync ? null : (
+          <Button
+            size="sm"
+            variant="outline"
+            className="w-full sm:w-auto"
+            onClick={() =>
+              onChange((prev) => ({
+                ...prev,
+                gateway_rate_sync: { ...emptyGatewayRateSyncForm },
+              }))
+            }
+          >
+            <Plus className="size-3.5" />
+            添加倍率同步
+          </Button>
+        )}
+      </div>
+
+      {rateSync ? (
+        <div className="overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="min-w-36">源渠道</TableHead>
+                <TableHead className="min-w-44">网关</TableHead>
+                <TableHead className="min-w-32">最高倍率/最低倍率</TableHead>
+                <TableHead className="min-w-28">倍率计算方式</TableHead>
+                <TableHead className="min-w-44">倍率换算</TableHead>
+                <TableHead className="min-w-44">分组倍率变量</TableHead>
+                <TableHead className="min-w-56">倍率限制</TableHead>
+                <TableHead className="min-w-28">权重/负载</TableHead>
+                <TableHead className="min-w-24">并发</TableHead>
+                <TableHead className="min-w-24">状态</TableHead>
+                <TableHead className="w-12" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              <TableRow>
+                <TableCell>
+                  <Select
+                    value={rateSync.source_kind}
+                    onValueChange={(value) => {
+                      if (value === "0") {
+                        onChange((prev) => ({ ...prev, gateway_rate_sync: null }));
+                        return;
+                      }
+                      setRateSync({ source_kind: "gateway_group" });
+                    }}
+                  >
+                    <SelectTrigger className="w-36">
+                      <SelectValue placeholder="选择源渠道" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="0">请选择</SelectItem>
+                      <SelectItem value="gateway_group">网关组</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </TableCell>
+                <TableCell>
+                  <Select
+                    value={rateSync.gateway_group_id || "0"}
+                    onValueChange={(value) =>
+                      setRateSync({ gateway_group_id: value === "0" ? "" : value })
+                    }
+                  >
+                    <SelectTrigger className="w-44">
+                      <SelectValue placeholder={groupsLoading ? "加载中..." : "选择网关"} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="0">请选择</SelectItem>
+                      {gatewayGroups.map((group) => (
+                        <SelectItem key={group.id} value={String(group.id)}>
+                          {group.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </TableCell>
+                <TableCell>
+                  <span className="whitespace-nowrap font-mono text-sm tabular-nums">
+                    {routesLoading
+                      ? "加载中..."
+                      : `${formatRate(rateRange.max)} / ${formatRate(rateRange.min)}`}
+                  </span>
+                </TableCell>
+                <TableCell>
+                  <Select
+                    value={rateSync.gateway_rate_mode}
+                    onValueChange={(value) =>
+                      setRateSync({
+                        gateway_rate_mode: value === "min" ? "min" : "max",
+                      })
+                    }
+                  >
+                    <SelectTrigger className="w-28">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="max">最高倍率</SelectItem>
+                      <SelectItem value="min">最低倍率</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </TableCell>
+                <TableCell>
+                  <div className="flex items-center gap-2">
+                    <Select
+                      value={rateSync.rate_convert_mode}
+                      onValueChange={(value) =>
+                        setRateSync({
+                          rate_convert_mode: value as UpstreamSyncRateConvertMode,
+                        })
+                      }
+                    >
+                      <SelectTrigger className="w-16">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="add">+</SelectItem>
+                        <SelectItem value="subtract">-</SelectItem>
+                        <SelectItem value="multiply">*</SelectItem>
+                        <SelectItem value="divide">/</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Input
+                      className="w-24"
+                      type="number"
+                      step="0.01"
+                      value={String(rateSync.rate_convert_value)}
+                      onChange={(e) =>
+                        setRateSync({
+                          rate_convert_value: Number(e.target.value || 0),
+                        })
+                      }
+                    />
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div className="space-y-0.5 font-mono text-xs tabular-nums">
+                    <p>{rateVariable}</p>
+                    <p className="text-muted-foreground">= {formatRate(calculatedRate)}</p>
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      className="w-24"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={String(rateSync.gateway_rate_max)}
+                      aria-label="最高调整倍率"
+                      placeholder="最高"
+                      onChange={(e) =>
+                        setRateSync({
+                          gateway_rate_max: Math.max(0, Number(e.target.value || 0)),
+                        })
+                      }
+                    />
+                    <Input
+                      className="w-24"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={String(rateSync.gateway_rate_min)}
+                      aria-label="最低调整倍率"
+                      placeholder="最低"
+                      onChange={(e) =>
+                        setRateSync({
+                          gateway_rate_min: Math.max(0, Number(e.target.value || 0)),
+                        })
+                      }
+                    />
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <Input
+                    className="w-28"
+                    type="number"
+                    step="0.01"
+                    value={String(rateSync.weight)}
+                    onChange={(e) => setRateSync({ weight: num(e.target.value) })}
+                  />
+                </TableCell>
+                <TableCell>
+                  <Input
+                    className="w-24"
+                    type="number"
+                    value={String(rateSync.concurrency)}
+                    onChange={(e) =>
+                      setRateSync({ concurrency: num(e.target.value) })
+                    }
+                  />
+                </TableCell>
+                <TableCell>
+                  <Select
+                    value={rateSync.enabled ? "enabled" : "disabled"}
+                    onValueChange={(value) =>
+                      setRateSync({ enabled: value === "enabled" })
+                    }
+                  >
+                    <SelectTrigger className="w-24">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="enabled">启用</SelectItem>
+                      <SelectItem value="disabled">禁用</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </TableCell>
+                <TableCell>
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                    onClick={() =>
+                      onChange((prev) => ({ ...prev, gateway_rate_sync: null }))
+                    }
+                  >
+                    <Trash2 className="size-4" />
+                    <span className="sr-only">删除倍率同步</span>
+                  </Button>
+                </TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function applyGatewayRateOperation(
+  base: number,
+  operation: UpstreamSyncRateConvertMode,
+  value: number,
+) {
+  switch (operation) {
+    case "add":
+      return base + value;
+    case "subtract":
+      return base - value;
+    case "multiply":
+      return base * value;
+    case "divide":
+      return value === 0 ? base : base / value;
+    default:
+      return base;
+  }
+}
+
+function clampGatewayRate(value: number, minValue: number, maxValue: number) {
+  const min = Math.max(0, minValue || 0);
+  const max = Math.max(0, maxValue || 0);
+  return Math.min(max > 0 ? max : Number.POSITIVE_INFINITY, Math.max(min, value));
 }
 
 function Panel({

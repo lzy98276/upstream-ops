@@ -16,6 +16,7 @@ import (
 
 	"github.com/bejix/upstream-ops/backend/connector"
 	"github.com/bejix/upstream-ops/backend/crypto"
+	"github.com/bejix/upstream-ops/backend/gateway"
 	"github.com/bejix/upstream-ops/backend/notify"
 	"github.com/bejix/upstream-ops/backend/storage"
 	"gorm.io/gorm"
@@ -328,6 +329,10 @@ func openSyncerTestDB(t *testing.T) *gorm.DB {
 }
 
 func newTestService(t *testing.T, db *gorm.DB, fake *fakeChannelService) *Service {
+	return newTestServiceWithGateway(t, db, fake, nil, "")
+}
+
+func newTestServiceWithGateway(t *testing.T, db *gorm.DB, fake *fakeChannelService, gatewaySvc *gateway.Service, gatewayBaseURL string) *Service {
 	t.Helper()
 	c, err := crypto.NewCipher("test-secret")
 	if err != nil {
@@ -345,6 +350,8 @@ func newTestService(t *testing.T, db *gorm.DB, fake *fakeChannelService) *Servic
 		storage.NewUpstreamSyncAccounts(db),
 		storage.NewUpstreamSyncManagedAccounts(db),
 		storage.NewUpstreamSyncLogs(db),
+		gatewaySvc,
+		gatewayBaseURL,
 	)
 }
 
@@ -2286,5 +2293,116 @@ func TestSyncGroupChangeDispatchesNotification(t *testing.T) {
 		if item.Event != storage.EventUpstreamSyncGroupChanged || !item.Success {
 			t.Fatalf("notification log = %#v", item)
 		}
+	}
+}
+
+func TestGatewayRateSyncCreatesKeyAndClampsMultiplier(t *testing.T) {
+	srv, admin := newAdminServer(t)
+	defer srv.Close()
+	db := openSyncerTestDB(t)
+	fake := &fakeChannelService{}
+
+	cipher, err := crypto.NewCipher("test-secret")
+	if err != nil {
+		t.Fatalf("new gateway cipher: %v", err)
+	}
+	gatewaySvc := gateway.NewService(
+		storage.NewGatewayGroups(db),
+		storage.NewGatewayKeys(db),
+		storage.NewGatewayRoutes(db),
+		nil,
+		nil,
+		storage.NewChannels(db),
+		fake,
+		cipher,
+		nil,
+	)
+	gatewayGroup, err := gatewaySvc.CreateGroup(gateway.CreateGroupInput{Name: "rate-source"})
+	if err != nil {
+		t.Fatalf("create gateway group: %v", err)
+	}
+	if err := storage.NewGatewayRoutes(db).SaveForGroup(gatewayGroup.ID, []storage.GatewayRoute{
+		{SourceChannelID: 1, SourceGroupName: "low", BillingRateMultiplier: 0.01, Enabled: true},
+		{SourceChannelID: 2, SourceGroupName: "high", BillingRateMultiplier: 0.3, Enabled: true},
+	}); err != nil {
+		t.Fatalf("save gateway routes: %v", err)
+	}
+	svc := newTestServiceWithGateway(t, db, fake, gatewaySvc, "https://upstream-ops.example")
+
+	target, err := svc.CreateTarget(context.Background(), TargetInput{
+		Name:        "target",
+		BaseURL:     srv.URL,
+		AdminAPIKey: "admin-key",
+		Enabled:     true,
+	})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	targetGroups, err := svc.SyncTargetGroups(context.Background(), target.ID)
+	if err != nil {
+		t.Fatalf("sync target groups: %v", err)
+	}
+
+	gatewayGroupID := gatewayGroup.ID
+	rule, err := svc.CreateSyncGroup(SyncGroupDTO{
+		NameTemplate:    "gateway-rate",
+		TargetID:        target.ID,
+		TargetGroupIDs:  []uint{targetGroups[0].ID},
+		Platform:        "openai",
+		ModelLimitsMode: "all",
+		Accounts: []SyncAccountDTO{{
+			SourceKind:       "gateway_group",
+			GatewayGroupID:   &gatewayGroupID,
+			GatewayRateMode:  "min",
+			GatewayRateMin:   0.1,
+			GatewayRateMax:   0,
+			RateConvertMode:  "multiply",
+			RateConvertValue: 8,
+			Concurrency:      2,
+			Weight:           50,
+			Enabled:          true,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("create gateway rate sync group: %v", err)
+	}
+	keys, err := gatewaySvc.ListKeysByGroup(gatewayGroup.ID)
+	if err != nil {
+		t.Fatalf("list gateway keys: %v", err)
+	}
+	if len(keys) != 1 || keys[0].Name != rule.Name {
+		t.Fatalf("gateway keys = %#v, want one named %q", keys, rule.Name)
+	}
+	secret, err := gatewaySvc.RevealKey(keys[0].ID)
+	if err != nil {
+		t.Fatalf("reveal gateway key: %v", err)
+	}
+
+	if _, err := svc.ApplySyncGroup(context.Background(), rule.ID); err != nil {
+		t.Fatalf("apply minimum-clamped gateway rate: %v", err)
+	}
+	account := admin.accounts[10]
+	if account["rate_multiplier"] != float64(0.1) {
+		t.Fatalf("minimum-clamped rate multiplier = %#v, want 0.1", account["rate_multiplier"])
+	}
+	credentials := account["credentials"].(map[string]any)
+	if credentials["base_url"] != "https://upstream-ops.example" || credentials["api_key"] != secret {
+		t.Fatalf("gateway credentials = %#v", credentials)
+	}
+
+	rule.Accounts[0].GatewayRateMode = "max"
+	rule.Accounts[0].GatewayRateMin = 0
+	rule.Accounts[0].GatewayRateMax = 0.5
+	rule.Accounts[0].RateConvertMode = "multiply"
+	rule.Accounts[0].RateConvertValue = 10
+	rule, err = svc.UpdateSyncGroup(rule.ID, *rule)
+	if err != nil {
+		t.Fatalf("update gateway rate sync group: %v", err)
+	}
+	if _, err := svc.ApplySyncGroup(context.Background(), rule.ID); err != nil {
+		t.Fatalf("apply maximum-clamped gateway rate: %v", err)
+	}
+	if got := admin.accounts[10]["rate_multiplier"]; got != float64(0.5) {
+		t.Fatalf("maximum-clamped rate multiplier = %#v, want 0.5", got)
 	}
 }
