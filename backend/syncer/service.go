@@ -671,6 +671,12 @@ func (s *Service) ApplySyncGroup(ctx context.Context, syncGroupID uint) (*LogDTO
 		_ = s.syncGroups.UpdateStatus(syncGroup.ID, "failed", err.Error(), nil)
 		return s.appendLog(syncGroup.ID, target.ID, "apply", false, err.Error())
 	}
+	if hasGatewaySyncAccount(accounts) {
+		if _, err := s.SyncTargetGroups(ctx, target.ID); err != nil {
+			_ = s.syncGroups.UpdateStatus(syncGroup.ID, "failed", err.Error(), nil)
+			return s.appendLog(syncGroup.ID, target.ID, "apply", false, err.Error())
+		}
+	}
 	targetGroups, selectedGroups, remoteGroupIDs, err := s.selectedTargetGroups(syncGroup)
 	if err != nil {
 		_ = s.syncGroups.UpdateStatus(syncGroup.ID, "blocked_missing_group", err.Error(), nil)
@@ -2135,6 +2141,15 @@ func isGatewaySyncAccount(account *storage.UpstreamSyncAccount) bool {
 	return account != nil && normalizeSyncAccountSourceKind(account.SourceKind) == "gateway_group"
 }
 
+func hasGatewaySyncAccount(accounts []storage.UpstreamSyncAccount) bool {
+	for i := range accounts {
+		if isGatewaySyncAccount(&accounts[i]) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) validateGatewaySyncAccounts(accounts []storage.UpstreamSyncAccount) error {
 	count := 0
 	for i := range accounts {
@@ -2265,9 +2280,6 @@ func (s *Service) syncGatewayTargetGroupRates(
 		for _, group := range selectedGroups {
 			if group.RemoteGroupID <= 0 {
 				return nil, fmt.Errorf("target group %q has no remote ID", group.Name)
-			}
-			if group.Ratio == rate {
-				continue
 			}
 			if err := client.UpdateGroupRateMultiplier(ctx, target, group.RemoteGroupID, rate); err != nil {
 				return nil, fmt.Errorf("update target group %q rate multiplier: %w", group.Name, err)
