@@ -125,13 +125,13 @@ interface SyncAccountForm {
   source_group_name: string;
   gateway_group_id: string;
   gateway_rate_mode: "max" | "min";
-  gateway_rate_min: number;
-  gateway_rate_max: number;
+  gateway_rate_min: string;
+  gateway_rate_max: string;
   proxy_id: string;
   concurrency: number;
   weight: number;
   rate_convert_mode: UpstreamSyncRateConvertMode;
-  rate_convert_value: number;
+  rate_convert_value: string;
   enabled: boolean;
   test_enabled: boolean;
   test_model: string;
@@ -171,13 +171,13 @@ const emptySyncAccountForm: SyncAccountForm = {
   source_group_name: "",
   gateway_group_id: "",
   gateway_rate_mode: "max",
-  gateway_rate_min: 0,
-  gateway_rate_max: 0,
+  gateway_rate_min: "0",
+  gateway_rate_max: "0",
   proxy_id: "",
   concurrency: 10,
   weight: 1,
   rate_convert_mode: "raw",
-  rate_convert_value: 1,
+  rate_convert_value: "1",
   enabled: true,
   test_enabled: false,
   test_model: "",
@@ -187,7 +187,7 @@ const emptyGatewayRateSyncForm: SyncAccountForm = {
   ...emptySyncAccountForm,
   source_kind: "gateway_group",
   rate_convert_mode: "multiply",
-  rate_convert_value: 1,
+  rate_convert_value: "1",
 };
 
 const syncPlatformOptions = [
@@ -206,6 +206,11 @@ const LOG_DIALOG_PAGE_SIZE = 20;
 
 function num(value: string) {
   return Number(value || 0);
+}
+
+function decimalNumber(value: string | number, fallback = 0) {
+  const parsed = typeof value === "number" ? value : Number(value.trim());
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function normalizePlatform(value?: string) {
@@ -232,13 +237,13 @@ function accountToForm(account: UpstreamSyncAccount): SyncAccountForm {
     gateway_group_id:
       account.gateway_group_id == null ? "" : String(account.gateway_group_id),
     gateway_rate_mode: account.gateway_rate_mode === "min" ? "min" : "max",
-    gateway_rate_min: account.gateway_rate_min ?? 0,
-    gateway_rate_max: account.gateway_rate_max ?? 0,
+    gateway_rate_min: String(account.gateway_rate_min ?? 0),
+    gateway_rate_max: String(account.gateway_rate_max ?? 0),
     proxy_id: account.proxy_id == null ? "" : String(account.proxy_id),
     concurrency: account.concurrency || 10,
     weight: account.weight || 1,
     rate_convert_mode: account.rate_convert_mode || "raw",
-    rate_convert_value: account.rate_convert_value ?? 1,
+    rate_convert_value: String(account.rate_convert_value ?? 1),
     enabled: account.enabled,
     test_enabled: account.test_enabled ?? false,
     test_model: account.test_model ?? "",
@@ -262,8 +267,9 @@ function syncAccountPayload(account: SyncAccountForm) {
       isGatewayRateSync && account.gateway_group_id
         ? Number(account.gateway_group_id)
         : null,
-    gateway_rate_min: Math.max(0, account.gateway_rate_min || 0),
-    gateway_rate_max: Math.max(0, account.gateway_rate_max || 0),
+    gateway_rate_min: Math.max(0, decimalNumber(account.gateway_rate_min)),
+    gateway_rate_max: Math.max(0, decimalNumber(account.gateway_rate_max)),
+    rate_convert_value: decimalNumber(account.rate_convert_value, 1),
     proxy_id: isGatewayRateSync
       ? null
       : account.proxy_id
@@ -278,7 +284,9 @@ function accountRateMultiplier(
   account: SyncAccountForm,
   groups: RateSnapshot[],
 ) {
-  if (account.rate_convert_mode === "custom") return account.rate_convert_value;
+  if (account.rate_convert_mode === "custom") {
+    return decimalNumber(account.rate_convert_value);
+  }
   const sourceGroupName = account.source_group_name.trim();
   const sourceGroupID = Number(account.source_group_id || 0);
   const sourceRatio =
@@ -860,10 +868,10 @@ export function UpstreamSyncSettings() {
       if (
         syncGroupForm.sync_mode === "gateway_rate" &&
         syncGroupForm.gateway_rate_sync &&
-        syncGroupForm.gateway_rate_sync.gateway_rate_min > 0 &&
-        syncGroupForm.gateway_rate_sync.gateway_rate_max > 0 &&
-        syncGroupForm.gateway_rate_sync.gateway_rate_min >
-          syncGroupForm.gateway_rate_sync.gateway_rate_max
+        decimalNumber(syncGroupForm.gateway_rate_sync.gateway_rate_min) > 0 &&
+        decimalNumber(syncGroupForm.gateway_rate_sync.gateway_rate_max) > 0 &&
+        decimalNumber(syncGroupForm.gateway_rate_sync.gateway_rate_min) >
+          decimalNumber(syncGroupForm.gateway_rate_sync.gateway_rate_max)
       ) {
         toast.error("最低调整倍率不能大于最高调整倍率");
         return;
@@ -2138,7 +2146,8 @@ function SyncGroupFormView({
                     <TableCell>
                       <Input
                         className="w-32"
-                        type="number"
+                        type="text"
+                        inputMode="decimal"
                         step="0.0001"
                         value={
                           account.rate_convert_mode === "custom"
@@ -2148,7 +2157,7 @@ function SyncGroupFormView({
                         disabled={account.rate_convert_mode !== "custom"}
                         onChange={(e) =>
                           updateAccount(index, {
-                            rate_convert_value: Number(e.target.value || 0),
+                            rate_convert_value: e.target.value,
                           })
                         }
                       />
@@ -2373,10 +2382,10 @@ function GatewayRateSyncCard({
         applyGatewayRateOperation(
           selectedBaseRate,
           rateSync.rate_convert_mode,
-          rateSync.rate_convert_value,
+          decimalNumber(rateSync.rate_convert_value),
         ),
-        rateSync.gateway_rate_min,
-        rateSync.gateway_rate_max,
+        decimalNumber(rateSync.gateway_rate_min),
+        decimalNumber(rateSync.gateway_rate_max),
       )
     : 0;
   const rateVariable =
@@ -2400,8 +2409,8 @@ function GatewayRateSyncCard({
                 <TableHead className="min-w-32">最高倍率/最低倍率</TableHead>
                 <TableHead className="min-w-28">倍率计算方式</TableHead>
                 <TableHead className="min-w-44">倍率换算</TableHead>
-                <TableHead className="min-w-44">分组倍率变量</TableHead>
                 <TableHead className="min-w-56">倍率限制</TableHead>
+                <TableHead className="min-w-44">分组倍率变量</TableHead>
                 <TableHead className="min-w-28">权重/负载</TableHead>
                 <TableHead className="min-w-24">并发</TableHead>
                 <TableHead className="min-w-24">状态</TableHead>
@@ -2496,12 +2505,47 @@ function GatewayRateSyncCard({
                     </Select>
                     <Input
                       className="w-24"
-                      type="number"
+                      type="text"
+                      inputMode="decimal"
                       step="0.0001"
                       value={String(rateSync.rate_convert_value)}
                       onChange={(e) =>
                         setRateSync({
-                          rate_convert_value: Number(e.target.value || 0),
+                          rate_convert_value: e.target.value,
+                        })
+                      }
+                    />
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      className="w-24"
+                      type="text"
+                      inputMode="decimal"
+                      min="0"
+                      step="0.0001"
+                      value={rateSync.gateway_rate_max}
+                      aria-label="最高调整倍率"
+                      placeholder="最高"
+                      onChange={(e) =>
+                        setRateSync({
+                          gateway_rate_max: e.target.value,
+                        })
+                      }
+                    />
+                    <Input
+                      className="w-24"
+                      type="text"
+                      inputMode="decimal"
+                      min="0"
+                      step="0.0001"
+                      value={rateSync.gateway_rate_min}
+                      aria-label="最低调整倍率"
+                      placeholder="最低"
+                      onChange={(e) =>
+                        setRateSync({
+                          gateway_rate_min: e.target.value,
                         })
                       }
                     />
@@ -2511,38 +2555,6 @@ function GatewayRateSyncCard({
                   <div className="space-y-0.5 font-mono text-xs tabular-nums">
                     <p>{rateVariable}</p>
                     <p className="text-muted-foreground">= {formatRate(calculatedRate)}</p>
-                  </div>
-                </TableCell>
-                <TableCell>
-                  <div className="flex items-center gap-2">
-                    <Input
-                      className="w-24"
-                      type="number"
-                      min="0"
-                      step="0.0001"
-                      value={String(rateSync.gateway_rate_max)}
-                      aria-label="最高调整倍率"
-                      placeholder="最高"
-                      onChange={(e) =>
-                        setRateSync({
-                          gateway_rate_max: Math.max(0, Number(e.target.value || 0)),
-                        })
-                      }
-                    />
-                    <Input
-                      className="w-24"
-                      type="number"
-                      min="0"
-                      step="0.0001"
-                      value={String(rateSync.gateway_rate_min)}
-                      aria-label="最低调整倍率"
-                      placeholder="最低"
-                      onChange={(e) =>
-                        setRateSync({
-                          gateway_rate_min: Math.max(0, Number(e.target.value || 0)),
-                        })
-                      }
-                    />
                   </div>
                 </TableCell>
                 <TableCell>
