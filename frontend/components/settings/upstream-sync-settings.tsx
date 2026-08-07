@@ -98,6 +98,7 @@ interface TargetForm {
 
 interface SyncGroupForm {
   id?: number;
+  sync_mode: "account" | "gateway_rate";
   display_name: string;
   name_template: string;
   target_id: number;
@@ -144,6 +145,7 @@ const emptyTargetForm: TargetForm = {
 };
 
 const emptySyncGroupForm: SyncGroupForm = {
+  sync_mode: "account",
   display_name: "",
   name_template: "sync-{同步分组ID}",
   target_id: 0,
@@ -780,6 +782,7 @@ export function UpstreamSyncSettings() {
       null;
     return {
       id: syncGroup.id,
+      sync_mode: gatewayRateSync ? "gateway_rate" : "account",
       display_name: syncGroup.display_name || syncGroup.name,
       name_template: syncGroup.name_template,
       target_id: syncGroup.target_id,
@@ -810,11 +813,20 @@ export function UpstreamSyncSettings() {
   function buildSyncGroupPayload(
     groupsByChannel: Record<number, RateSnapshot[]> = sourceGroupsByChannel,
   ) {
+    const configuredAccounts = syncGroupForm.accounts.filter(
+      (account) => account.source_channel_id > 0,
+    );
     const sortedAccounts = sortSyncAccountRows(
-      syncGroupForm.accounts,
+      configuredAccounts,
       groupsByChannel,
       syncGroupForm.rate_sort_direction,
     );
+    const accounts =
+      syncGroupForm.sync_mode === "gateway_rate"
+        ? syncGroupForm.gateway_rate_sync
+          ? [syncAccountPayload(syncGroupForm.gateway_rate_sync)]
+          : []
+        : sortedAccounts.map(({ account }) => syncAccountPayload(account));
     return {
       ...syncGroupForm,
       target_id: selectedTargetID ?? syncGroupForm.target_id,
@@ -822,12 +834,7 @@ export function UpstreamSyncSettings() {
         syncGroupForm.model_limits_mode === "custom"
           ? normalizeModelInput(syncGroupForm.model_limits)
           : "",
-      accounts: [
-        ...sortedAccounts.map(({ account }) => syncAccountPayload(account)),
-        ...(syncGroupForm.gateway_rate_sync
-          ? [syncAccountPayload(syncGroupForm.gateway_rate_sync)]
-          : []),
-      ],
+      accounts,
     };
   }
 
@@ -835,14 +842,15 @@ export function UpstreamSyncSettings() {
     const targetID = selectedTargetID ?? syncGroupForm.target_id;
     setBusy("sync-group");
     try {
-      const missingChannelIndex = syncGroupForm.accounts.findIndex(
-        (account) => !account.source_channel_id,
-      );
-      if (missingChannelIndex >= 0) {
-        toast.error(`同步账号${missingChannelIndex + 1}未选择源渠道`);
+      if (
+        syncGroupForm.sync_mode === "gateway_rate" &&
+        !syncGroupForm.gateway_rate_sync
+      ) {
+        toast.error("倍率同步未配置网关组");
         return;
       }
       if (
+        syncGroupForm.sync_mode === "gateway_rate" &&
         syncGroupForm.gateway_rate_sync &&
         !syncGroupForm.gateway_rate_sync.gateway_group_id
       ) {
@@ -850,6 +858,7 @@ export function UpstreamSyncSettings() {
         return;
       }
       if (
+        syncGroupForm.sync_mode === "gateway_rate" &&
         syncGroupForm.gateway_rate_sync &&
         syncGroupForm.gateway_rate_sync.gateway_rate_min > 0 &&
         syncGroupForm.gateway_rate_sync.gateway_rate_max > 0 &&
@@ -1827,7 +1836,7 @@ function SyncGroupFormView({
             </div>
           </Field>
 
-          <div className="grid gap-2 md:grid-cols-3">
+          <div className="grid gap-2 md:grid-cols-4">
             <CompactSwitchLine
               id="sync-group-cron-enabled"
               label="Cron 自动应用"
@@ -1855,6 +1864,34 @@ function SyncGroupFormView({
                 }))
               }
             />
+            <div className="flex h-9 items-center justify-between gap-3 rounded-md border border-border bg-background/90 px-3">
+              <Label className="text-xs font-medium text-foreground">
+                同步功能
+              </Label>
+              <Select
+                value={syncGroupForm.sync_mode}
+                onValueChange={(value) =>
+                  onChange((prev) => ({
+                    ...prev,
+                    sync_mode: value as "account" | "gateway_rate",
+                    gateway_rate_sync:
+                      value === "gateway_rate"
+                        ? (prev.gateway_rate_sync ?? {
+                            ...emptyGatewayRateSyncForm,
+                          })
+                        : prev.gateway_rate_sync,
+                  }))
+                }
+              >
+                <SelectTrigger className="h-7 w-28">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="account">同步账号</SelectItem>
+                  <SelectItem value="gateway_rate">倍率同步</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </div>
 
           {syncGroupForm.pool_mode_enabled ||
@@ -1910,6 +1947,7 @@ function SyncGroupFormView({
         </div>
       </section>
 
+      {syncGroupForm.sync_mode === "account" ? (
       <section className="rounded-xl border border-border bg-background/80 p-3 sm:p-4">
         <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div className="space-y-1">
@@ -2101,7 +2139,7 @@ function SyncGroupFormView({
                       <Input
                         className="w-32"
                         type="number"
-                        step="0.01"
+                        step="0.0001"
                         value={
                           account.rate_convert_mode === "custom"
                             ? String(account.rate_convert_value)
@@ -2217,8 +2255,11 @@ function SyncGroupFormView({
           </Table>
         </div>
       </section>
+      ) : null}
 
-      <GatewayRateSyncCard syncGroupForm={syncGroupForm} onChange={onChange} />
+      {syncGroupForm.sync_mode === "gateway_rate" ? (
+        <GatewayRateSyncCard syncGroupForm={syncGroupForm} onChange={onChange} />
+      ) : null}
 
       <DialogFooter className="sticky bottom-0 -mx-3 border-t bg-background/95 px-3 pt-3 backdrop-blur sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:px-0 sm:pt-0">
         <Button variant="outline" className="w-full sm:w-auto" onClick={onCancel}>
@@ -2249,6 +2290,14 @@ function GatewayRateSyncCard({
   const [routesLoading, setRoutesLoading] = useState(false);
   const rateSync = syncGroupForm.gateway_rate_sync;
   const gatewayGroupID = Number(rateSync?.gateway_group_id || 0);
+
+  useEffect(() => {
+    if (rateSync) return;
+    onChange((prev) => ({
+      ...prev,
+      gateway_rate_sync: { ...emptyGatewayRateSyncForm },
+    }));
+  }, [onChange, rateSync]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2332,29 +2381,13 @@ function GatewayRateSyncCard({
     : 0;
   const rateVariable =
     rateSync?.gateway_rate_mode === "min"
-      ? "{网关组最低倍率}"
-      : "{网关组最高倍率}";
+      ? "网关组最低倍率"
+      : "网关组最高倍率";
 
   return (
     <section className="rounded-xl border border-border bg-background/80 p-3 sm:p-4">
       <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <p className="text-sm font-semibold text-foreground">倍率同步</p>
-        {rateSync ? null : (
-          <Button
-            size="sm"
-            variant="outline"
-            className="w-full sm:w-auto"
-            onClick={() =>
-              onChange((prev) => ({
-                ...prev,
-                gateway_rate_sync: { ...emptyGatewayRateSyncForm },
-              }))
-            }
-          >
-            <Plus className="size-3.5" />
-            添加倍率同步
-          </Button>
-        )}
       </div>
 
       {rateSync ? (
@@ -2372,7 +2405,6 @@ function GatewayRateSyncCard({
                 <TableHead className="min-w-28">权重/负载</TableHead>
                 <TableHead className="min-w-24">并发</TableHead>
                 <TableHead className="min-w-24">状态</TableHead>
-                <TableHead className="w-12" />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -2465,7 +2497,7 @@ function GatewayRateSyncCard({
                     <Input
                       className="w-24"
                       type="number"
-                      step="0.01"
+                      step="0.0001"
                       value={String(rateSync.rate_convert_value)}
                       onChange={(e) =>
                         setRateSync({
@@ -2487,7 +2519,7 @@ function GatewayRateSyncCard({
                       className="w-24"
                       type="number"
                       min="0"
-                      step="0.01"
+                      step="0.0001"
                       value={String(rateSync.gateway_rate_max)}
                       aria-label="最高调整倍率"
                       placeholder="最高"
@@ -2501,7 +2533,7 @@ function GatewayRateSyncCard({
                       className="w-24"
                       type="number"
                       min="0"
-                      step="0.01"
+                      step="0.0001"
                       value={String(rateSync.gateway_rate_min)}
                       aria-label="最低调整倍率"
                       placeholder="最低"
@@ -2547,19 +2579,6 @@ function GatewayRateSyncCard({
                       <SelectItem value="disabled">禁用</SelectItem>
                     </SelectContent>
                   </Select>
-                </TableCell>
-                <TableCell>
-                  <Button
-                    size="icon-sm"
-                    variant="ghost"
-                    className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-                    onClick={() =>
-                      onChange((prev) => ({ ...prev, gateway_rate_sync: null }))
-                    }
-                  >
-                    <Trash2 className="size-4" />
-                    <span className="sr-only">删除倍率同步</span>
-                  </Button>
                 </TableCell>
               </TableRow>
             </TableBody>

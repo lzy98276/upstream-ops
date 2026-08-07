@@ -418,6 +418,36 @@ func (a *AdminClient) DeleteGroup(ctx context.Context, t AdminTarget, id int64) 
 	return nil
 }
 
+func (a *AdminClient) UpdateGroupRateMultiplier(ctx context.Context, t AdminTarget, id int64, multiplier float64) error {
+	body, err := json.Marshal(map[string]float64{"rate_multiplier": multiplier})
+	if err != nil {
+		return err
+	}
+	resp, err := a.client.http.R().
+		SetContext(ctx).
+		SetHeader("Content-Type", "application/json").
+		SetHeader("x-api-key", t.APIKey).
+		SetBody(body).
+		Put(strings.TrimRight(t.BaseURL, "/") + "/api/v1/admin/groups/" + strconv.FormatInt(id, 10))
+	if err != nil {
+		return err
+	}
+	if resp.IsError() {
+		return fmt.Errorf("update admin group rate multiplier: %w", connector.HTTPStatusError(resp.StatusCode(), resp.Body()))
+	}
+	var result struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(resp.Body(), &result); err != nil {
+		return fmt.Errorf("decode admin group update response: %w", err)
+	}
+	if result.Code != 0 {
+		return errors.New(strings.TrimSpace(result.Message))
+	}
+	return nil
+}
+
 func (a *AdminClient) getJSON(ctx context.Context, t AdminTarget, path string) ([]byte, error) {
 	resp, err := a.client.http.R().
 		SetContext(ctx).

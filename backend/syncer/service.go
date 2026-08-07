@@ -686,6 +686,17 @@ func (s *Service) ApplySyncGroup(ctx context.Context, syncGroupID uint) (*LogDTO
 		_ = s.targets.UpdateCheck(target.ID, "failed", ptrTime(time.Now()), err.Error())
 		return s.appendLog(syncGroup.ID, target.ID, "apply", false, err.Error())
 	}
+	gatewayRateChanges, err := s.syncGatewayTargetGroupRates(
+		ctx,
+		accounts,
+		adminTarget,
+		client,
+		selectedGroups,
+	)
+	if err != nil {
+		_ = s.syncGroups.UpdateStatus(syncGroup.ID, "failed", err.Error(), nil)
+		return s.appendLog(syncGroup.ID, target.ID, "apply", false, err.Error())
+	}
 	deletedManaged, err := s.cleanupDeletedManagedAccounts(ctx, syncGroup, accounts, adminTarget, client)
 	if err != nil {
 		_ = s.syncGroups.UpdateStatus(syncGroup.ID, "failed", err.Error(), nil)
@@ -708,7 +719,7 @@ func (s *Service) ApplySyncGroup(ctx context.Context, syncGroupID uint) (*LogDTO
 	applied := 0
 	failures := make([]string, 0)
 	successes := make([]string, 0)
-	changes := make([]string, 0)
+	changes := append([]string(nil), gatewayRateChanges...)
 	if deletedManaged+deletedUnmanaged > 0 {
 		changes = append(changes, fmt.Sprintf("清理：删除失效托管账号 %d 个，重复远端账号 %d 个", deletedManaged, deletedUnmanaged))
 	}
@@ -996,6 +1007,7 @@ func (s *Service) applyAccount(
 		sourceName     string
 		sourceID       uint
 		sourceBaseURL  string
+		gatewayModels  []string
 		rateMultiplier float64
 		err            error
 	)
@@ -1008,14 +1020,12 @@ func (s *Service) applyAccount(
 		if groupErr != nil {
 			return nil, fmt.Errorf("gateway group missing: %d", *syncAccount.GatewayGroupID)
 		}
+		gatewayModels = gatewayModelMappingModels(gatewayGroup)
 		key, secret, err = s.ensureGatewayKey(syncGroup, syncAccount, keyName)
 		if err != nil {
 			return nil, err
 		}
-		rateMultiplier, err = s.gatewayRateMultiplierForAccount(syncAccount)
-		if err != nil {
-			return nil, err
-		}
+		rateMultiplier = 1
 		sourceName = "网关 " + gatewayGroup.Name
 		sourceID = gatewayGroup.ID
 		sourceBaseURL = s.gatewayBaseURL
@@ -1048,6 +1058,9 @@ func (s *Service) applyAccount(
 		syncAccount.Position+1,
 		rateMultiplier,
 	)
+	if isGatewaySyncAccount(syncAccount) && syncGroup.ModelLimitsMode == "sync_upstream" && len(gatewayModels) > 0 {
+		accountReq.Credentials["model_mapping"] = modelMappingFromModels(gatewayModels)
+	}
 	accountReq.Name = accountName
 	accountReq.Notes = syncedAccountNotes(now)
 	var account *sub2api.AdminAccount
@@ -1096,7 +1109,9 @@ func (s *Service) applyAccount(
 		}
 	}
 	syncedModels := []string(nil)
-	if syncGroup.ModelLimitsMode == "sync_upstream" {
+	if syncGroup.ModelLimitsMode == "sync_upstream" && isGatewaySyncAccount(syncAccount) {
+		syncedModels = gatewayModels
+	} else if syncGroup.ModelLimitsMode == "sync_upstream" {
 		models, err := client.SyncAccountModelsFromUpstream(ctx, adminTarget, account.ID)
 		if err != nil {
 			change, _ := s.disableManagedTargetAfterApplyFailure(ctx, syncGroup, syncAccount, adminTarget, client, account, accountName, selectedGroups, key, keyName, now, err.Error())
@@ -1154,7 +1169,7 @@ func (s *Service) applyAccount(
 	if syncAccount.ProxyID != nil {
 		msg += fmt.Sprintf("，代理 ID %d", *syncAccount.ProxyID)
 	}
-	if syncGroup.ModelLimitsMode == "sync_upstream" {
+	if syncGroup.ModelLimitsMode == "sync_upstream" && len(syncedModels) > 0 {
 		msg += fmt.Sprintf("，同步模型 %d 个", len(syncedModels))
 	}
 	if testMessage != "" {
@@ -2230,6 +2245,45 @@ func (s *Service) gatewayRateMultiplierForAccount(syncAccount *storage.UpstreamS
 	return clampGatewayRate(computed, syncAccount.GatewayRateMin, syncAccount.GatewayRateMax), nil
 }
 
+func (s *Service) syncGatewayTargetGroupRates(
+	ctx context.Context,
+	accounts []storage.UpstreamSyncAccount,
+	target sub2api.AdminTarget,
+	client *sub2api.AdminClient,
+	selectedGroups []storage.UpstreamSyncTargetGroup,
+) ([]string, error) {
+	for i := range accounts {
+		account := &accounts[i]
+		if !isGatewaySyncAccount(account) {
+			continue
+		}
+		rate, err := s.gatewayRateMultiplierForAccount(account)
+		if err != nil {
+			return nil, err
+		}
+		changes := make([]string, 0, len(selectedGroups))
+		for _, group := range selectedGroups {
+			if group.RemoteGroupID <= 0 {
+				return nil, fmt.Errorf("target group %q has no remote ID", group.Name)
+			}
+			if group.Ratio == rate {
+				continue
+			}
+			if err := client.UpdateGroupRateMultiplier(ctx, target, group.RemoteGroupID, rate); err != nil {
+				return nil, fmt.Errorf("update target group %q rate multiplier: %w", group.Name, err)
+			}
+			changes = append(changes, fmt.Sprintf(
+				"目标分组 %s 倍率 %s -> %s",
+				group.Name,
+				formatNumber(group.Ratio),
+				formatNumber(rate),
+			))
+		}
+		return changes, nil
+	}
+	return nil, nil
+}
+
 func applyGatewayRateOperation(base float64, operation string, value float64) float64 {
 	switch strings.TrimSpace(operation) {
 	case "add":
@@ -2524,6 +2578,23 @@ func modelMappingFromModels(models []string) map[string]string {
 	return out
 }
 
+func gatewayModelMappingModels(group *storage.GatewayGroup) []string {
+	if group == nil {
+		return nil
+	}
+	mapping := gateway.ParseModelMapping(group.ModelMappingJSON)
+	models := make([]string, 0, len(mapping))
+	for model := range mapping {
+		model = strings.TrimSpace(model)
+		if model == "" || model == "*" {
+			continue
+		}
+		models = append(models, model)
+	}
+	sort.Strings(models)
+	return models
+}
+
 func uniqueStrings(list []string) []string {
 	out := make([]string, 0, len(list))
 	seen := map[string]struct{}{}
@@ -2567,7 +2638,11 @@ func splitList(raw string) []string {
 
 func accountItems(list []SyncAccountDTO) []storage.UpstreamSyncAccount {
 	out := make([]storage.UpstreamSyncAccount, 0, len(list))
-	for i, item := range list {
+	for _, item := range list {
+		sourceKind := normalizeSyncAccountSourceKind(item.SourceKind)
+		if sourceKind == "channel" && item.SourceChannelID == 0 {
+			continue
+		}
 		mode := strings.TrimSpace(item.RateConvertMode)
 		if mode == "" {
 			mode = "raw"
@@ -2586,8 +2661,8 @@ func accountItems(list []SyncAccountDTO) []storage.UpstreamSyncAccount {
 		}
 		out = append(out, storage.UpstreamSyncAccount{
 			ID:               item.ID,
-			Position:         i,
-			SourceKind:       normalizeSyncAccountSourceKind(item.SourceKind),
+			Position:         len(out),
+			SourceKind:       sourceKind,
 			SourceChannelID:  item.SourceChannelID,
 			SourceGroupID:    item.SourceGroupID,
 			SourceGroupName:  strings.TrimSpace(item.SourceGroupName),

@@ -293,14 +293,32 @@ func (s *adminServerState) handleGroup(w http.ResponseWriter, r *http.Request) {
 	if _, err := fmt.Sscanf(strings.TrimPrefix(r.URL.Path, "/api/v1/admin/groups/"), "%d", &id); err != nil {
 		s.t.Fatalf("parse group id: %v", err)
 	}
-	if r.Method != http.MethodDelete {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.deleteGroups = append(s.deleteGroups, id)
-	respondJSON(w, map[string]any{"code": 0, "data": map[string]any{}})
+	switch r.Method {
+	case http.MethodPut:
+		var body struct {
+			RateMultiplier float64 `json:"rate_multiplier"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			s.t.Fatalf("decode group update body: %v", err)
+		}
+		for _, group := range s.groups {
+			if groupID, ok := group["id"].(int); ok && int64(groupID) == id {
+				group["ratio"] = body.RateMultiplier
+				group["rate_multiplier"] = body.RateMultiplier
+				respondJSON(w, map[string]any{"code": 0, "data": group})
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+		respondJSON(w, map[string]any{"code": 1, "message": "group not found"})
+	case http.MethodDelete:
+		s.deleteGroups = append(s.deleteGroups, id)
+		respondJSON(w, map[string]any{"code": 0, "data": map[string]any{}})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
 }
 
 func respondJSON(w http.ResponseWriter, body any) {
@@ -2317,7 +2335,10 @@ func TestGatewayRateSyncCreatesKeyAndClampsMultiplier(t *testing.T) {
 		cipher,
 		nil,
 	)
-	gatewayGroup, err := gatewaySvc.CreateGroup(gateway.CreateGroupInput{Name: "rate-source"})
+	gatewayGroup, err := gatewaySvc.CreateGroup(gateway.CreateGroupInput{
+		Name:             "rate-source",
+		ModelMappingJSON: `{"gateway-model":"upstream-model","gateway-alt":"upstream-alt"}`,
+	})
 	if err != nil {
 		t.Fatalf("create gateway group: %v", err)
 	}
@@ -2382,12 +2403,22 @@ func TestGatewayRateSyncCreatesKeyAndClampsMultiplier(t *testing.T) {
 		t.Fatalf("apply minimum-clamped gateway rate: %v", err)
 	}
 	account := admin.accounts[10]
-	if account["rate_multiplier"] != float64(0.1) {
-		t.Fatalf("minimum-clamped rate multiplier = %#v, want 0.1", account["rate_multiplier"])
+	if account["rate_multiplier"] != float64(1) {
+		t.Fatalf("gateway account rate multiplier = %#v, want 1", account["rate_multiplier"])
+	}
+	if got := admin.groups[0]["rate_multiplier"]; got != float64(0.1) {
+		t.Fatalf("target group rate multiplier = %#v, want 0.1", got)
+	}
+	if len(admin.syncModels) != 0 {
+		t.Fatalf("gateway rate sync model sync requests = %#v, want none", admin.syncModels)
 	}
 	credentials := account["credentials"].(map[string]any)
 	if credentials["base_url"] != "https://upstream-ops.example" || credentials["api_key"] != secret {
 		t.Fatalf("gateway credentials = %#v", credentials)
+	}
+	modelMapping, ok := credentials["model_mapping"].(map[string]any)
+	if !ok || modelMapping["gateway-model"] != "gateway-model" || modelMapping["gateway-alt"] != "gateway-alt" {
+		t.Fatalf("gateway model mapping = %#v", credentials["model_mapping"])
 	}
 
 	rule.Accounts[0].GatewayRateMode = "max"
@@ -2402,7 +2433,23 @@ func TestGatewayRateSyncCreatesKeyAndClampsMultiplier(t *testing.T) {
 	if _, err := svc.ApplySyncGroup(context.Background(), rule.ID); err != nil {
 		t.Fatalf("apply maximum-clamped gateway rate: %v", err)
 	}
-	if got := admin.accounts[10]["rate_multiplier"]; got != float64(0.5) {
-		t.Fatalf("maximum-clamped rate multiplier = %#v, want 0.5", got)
+	if got := admin.accounts[10]["rate_multiplier"]; got != float64(1) {
+		t.Fatalf("updated gateway account rate multiplier = %#v, want 1", got)
+	}
+	if got := admin.groups[0]["rate_multiplier"]; got != float64(0.5) {
+		t.Fatalf("updated target group rate multiplier = %#v, want 0.5", got)
+	}
+}
+
+func TestAccountItemsSkipsBlankChannelRows(t *testing.T) {
+	items := accountItems([]SyncAccountDTO{
+		{SourceChannelID: 0},
+		{SourceChannelID: 7, RateConvertMode: "raw", Enabled: true},
+	})
+	if len(items) != 1 {
+		t.Fatalf("sync account count = %d, want 1", len(items))
+	}
+	if items[0].SourceChannelID != 7 || items[0].Position != 0 {
+		t.Fatalf("stored account = %#v", items[0])
 	}
 }
