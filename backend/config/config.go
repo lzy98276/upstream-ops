@@ -376,7 +376,7 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("server.port", 8418)
 	v.SetDefault("server.mode", "debug")
-	v.SetDefault("server.baseURL", "http://localhost:8418")
+	v.SetDefault("server.baseURL", "http://upstream-hub:8418")
 
 	v.SetDefault("database.driver", "sqlite")
 	v.SetDefault("database.path", "./data/upstream-ops.db")
