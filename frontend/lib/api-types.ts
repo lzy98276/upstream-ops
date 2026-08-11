@@ -294,6 +294,9 @@ export interface SystemGatewayConfig {
   usageErrorMsgRunes: number
   usageErrorHeaderValueRunes: number
   usageErrorHeadersJSONBytes: number
+  streamKeepaliveSeconds: number
+  streamIdleTimeoutSeconds: number
+  streamMaxLineBytes: number
 }
 
 export interface SystemConfig {
@@ -610,6 +613,29 @@ export type GatewayGroupStatus = "active" | "disabled"
 export type GatewayRateSortDirection = "asc" | "desc"
 export type GatewayRateConvertMode = "raw" | "multiply_100" | "divide_100" | "custom"
 export type GatewayModelsMode = "auto" | "manual" | "hybrid"
+export type GatewayServiceTier = "all" | "priority" | "flex"
+export type GatewayServiceTierAction = "filter" | "passthrough" | "block" | "force_priority"
+export type GatewayServiceTierKeyScope = "all" | "selected"
+
+export interface GatewayServiceTierRule {
+  tier: GatewayServiceTier
+  action: GatewayServiceTierAction
+  key_scope?: GatewayServiceTierKeyScope
+  key_ids?: number[]
+  /** 仅兼容旧版单 Key 规则；新规则请使用 key_ids。 */
+  key_id?: number
+  /** 仅兼容旧版按用户邮箱保存的规则。 */
+  user_email?: string
+  models?: string[]
+}
+
+export interface GatewaySystemPromptRule {
+  enabled: boolean
+  text: string
+  override: boolean
+  key_scope: "all" | "selected"
+  key_ids: number[]
+}
 /** 上游协议：auto / OpenAI Chat / OpenAI Responses / Anthropic；openai 为 chat 历史别名 */
 export type GatewayUpstreamProtocol =
   | "auto"
@@ -628,12 +654,14 @@ export interface GatewayGroup {
   rate_sort_direction: GatewayRateSortDirection
   /**
    * 渠道分组价格倍率重排：开启后，倍率扫描结束时按源分组实时倍率
-   * 重写路由顺序与账号计费倍率（对齐上游同步账号）。
+   * 重写路由顺序与账号计费倍率。
    */
   rate_resort_enabled?: boolean
   model_mapping?: string
   models_json?: string
   models_mode: GatewayModelsMode
+  service_tier_rules_json?: string
+  system_prompt_rules_json?: string
   /** 重试总开关：关闭则失败直接回显，不重试不顺延 */
   retry_enabled?: boolean
   /** 同一路由额外重试次数（不含首次） */
@@ -954,10 +982,19 @@ export interface GatewayUsageModelOption {
 export interface ModelPriceOverride {
   id: number
   model_name: string
+  billing_mode: "token" | "per_request" | "image" | "video"
   input_price_per_token: number
   output_price_per_token: number
   cache_creation_price_per_token: number
   cache_read_price_per_token: number
+  per_request_price: number
+  pricing_tiers_json: string
+  image_price_1k: number
+  image_price_2k: number
+  image_price_4k: number
+  video_price_480p: number
+  video_price_720p: number
+  video_price_1080p: number
   enabled: boolean
   created_at: string
   updated_at: string

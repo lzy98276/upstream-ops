@@ -501,12 +501,17 @@ type GatewayGroup struct {
 	Status            string `gorm:"size:16;not null;default:'active';index" json:"status"`
 	RateSortDirection string `gorm:"size:16;not null;default:'asc'" json:"rate_sort_direction"`
 	// RateResortEnabled 渠道分组价格倍率重排：开启后，倍率扫描结束时按源分组实时倍率
-	// 重写路由 position 与 billing_rate_multiplier（对齐上游同步账号 Apply 逻辑）。
+	// 重写路由 position 与 billing_rate_multiplier。
 	// 关闭时仅在保存路由 / 改排序方向时落库顺序；运行时仍按实时倍率 SortRoutes。
 	RateResortEnabled bool   `gorm:"not null;default:false" json:"rate_resort_enabled"`
 	ModelMappingJSON  string `gorm:"type:text" json:"model_mapping,omitempty"`
 	ModelsJSON        string `gorm:"type:text" json:"models_json,omitempty"`
 	ModelsMode        string `gorm:"size:16;not null;default:'auto'" json:"models_mode"`
+	// ServiceTierRulesJSON 保存 OpenAI service_tier 的组级处理规则。
+	// 规则只在 OpenAI Chat / Responses 入站请求中生效。
+	ServiceTierRulesJSON string `gorm:"type:text" json:"service_tier_rules_json,omitempty"`
+	// SystemPromptRulesJSON 按数组顺序保存多条提示词注入规则。
+	SystemPromptRulesJSON string `gorm:"type:text" json:"system_prompt_rules_json"`
 	// 重试 / 顺延 / 冷却（组级策略）
 	// RetryEnabled=false：上游失败直接回显，不重试、不顺延
 	RetryEnabled bool `gorm:"not null;default:true" json:"retry_enabled"`
@@ -535,9 +540,11 @@ func (GatewayGroup) TableName() string { return "gateway_groups" }
 
 // GatewayKey 是客户端调用本服务 /v1/* 时使用的请求密钥（归属某个组）。
 type GatewayKey struct {
-	ID              uint       `gorm:"primaryKey" json:"id"`
-	GroupID         uint       `gorm:"not null;index;default:0" json:"group_id"`
-	Name            string     `gorm:"size:128;not null;uniqueIndex" json:"name"`
+	ID      uint   `gorm:"primaryKey" json:"id"`
+	GroupID uint   `gorm:"not null;index;default:0" json:"group_id"`
+	Name    string `gorm:"size:128;not null;uniqueIndex" json:"name"`
+	// OwnerEmail 仅用于兼容已保存的旧版指定用户策略，新规则改用 KeyID。
+	OwnerEmail      string     `gorm:"size:320;not null;default:'';index" json:"owner_email,omitempty"`
 	KeyHash         string     `gorm:"size:64;not null;uniqueIndex" json:"-"`
 	KeyPrefix       string     `gorm:"size:32;not null" json:"key_prefix"`
 	KeyCipher       string     `gorm:"type:text;not null" json:"-"`
@@ -688,14 +695,24 @@ type GatewayUsageLog struct {
 
 func (GatewayUsageLog) TableName() string { return "gateway_usage_logs" }
 
-// ModelPriceOverride 覆盖内置模型单价（per-token，USD）。
+// ModelPriceOverride 覆盖内置模型价格。token 单价单位为 USD/token；
+// 图片档位为 USD/张；视频档位为 USD/秒。
 type ModelPriceOverride struct {
 	ID                         uint      `gorm:"primaryKey" json:"id"`
 	ModelName                  string    `gorm:"size:256;not null;uniqueIndex" json:"model_name"`
+	BillingMode                string    `gorm:"size:32;not null;default:'token'" json:"billing_mode"`
 	InputPricePerToken         float64   `gorm:"not null;default:0" json:"input_price_per_token"`
 	OutputPricePerToken        float64   `gorm:"not null;default:0" json:"output_price_per_token"`
 	CacheCreationPricePerToken float64   `gorm:"not null;default:0" json:"cache_creation_price_per_token"`
 	CacheReadPricePerToken     float64   `gorm:"not null;default:0" json:"cache_read_price_per_token"`
+	PerRequestPrice            float64   `gorm:"not null;default:0" json:"per_request_price"`
+	PricingTiersJSON           string    `gorm:"type:text;not null;default:''" json:"pricing_tiers_json"`
+	ImagePrice1K               float64   `gorm:"not null;default:0" json:"image_price_1k"`
+	ImagePrice2K               float64   `gorm:"not null;default:0" json:"image_price_2k"`
+	ImagePrice4K               float64   `gorm:"not null;default:0" json:"image_price_4k"`
+	VideoPrice480P             float64   `gorm:"not null;default:0" json:"video_price_480p"`
+	VideoPrice720P             float64   `gorm:"not null;default:0" json:"video_price_720p"`
+	VideoPrice1080P            float64   `gorm:"not null;default:0" json:"video_price_1080p"`
 	Enabled                    bool      `gorm:"default:true" json:"enabled"`
 	CreatedAt                  time.Time `json:"created_at"`
 	UpdatedAt                  time.Time `json:"updated_at"`

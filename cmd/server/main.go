@@ -122,6 +122,8 @@ func main() {
 	gatewaySvc.UpdateProxyConfig(cfg.Proxy)
 	gatewaySvc.UpdateUpstreamConfig(cfg.Upstream)
 	gatewaySvc.UpdateGatewayConfig(cfg.Gateway)
+	gatewaySvc.StartPricing(cfg.Pricing)
+	defer gatewaySvc.Stop()
 	dispatcher := notify.NewDispatcher(notifies, cipher, log, notify.Policy{
 		NotificationPrefix:                       cfg.App.NotificationPrefix,
 		BatchRateChanges:                         cfg.Notifications.BatchRateChanges,

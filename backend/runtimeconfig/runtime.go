@@ -168,6 +168,7 @@ func (m *Manager) ApplyFromFile() (*ApplyResult, error) {
 		gatewaySvc.UpdateProxyConfig(cfg.Proxy)
 		gatewaySvc.UpdateUpstreamConfig(cfg.Upstream)
 		gatewaySvc.UpdateGatewayConfig(gwCfg)
+		gatewaySvc.UpdatePricingConfig(cfg.Pricing)
 	}
 
 	newScheduler := factory(cfg.Scheduler, cfg.Proxy)
@@ -187,7 +188,7 @@ func (m *Manager) ApplyFromFile() (*ApplyResult, error) {
 		oldScheduler.Stop()
 	}
 
-	sections := []string{"app", "auth", "scheduler", "notifications", "retention", "proxy", "upstream", "gateway"}
+	sections := []string{"app", "auth", "scheduler", "notifications", "retention", "proxy", "upstream", "gateway", "pricing"}
 	if m.log != nil {
 		m.log.Info("runtime config applied",
 			"sections", sections,
@@ -197,7 +198,7 @@ func (m *Manager) ApplyFromFile() (*ApplyResult, error) {
 
 	return &ApplyResult{
 		AppliedSections: sections,
-		Message:         "app、auth、scheduler、notifications、retention、proxy、upstream、gateway 已立即生效",
+		Message:         "app、auth、scheduler、notifications、retention、proxy、upstream、gateway、pricing 已立即生效",
 	}, nil
 }
 
