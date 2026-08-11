@@ -62,6 +62,7 @@ export interface Channel {
   recharge_multiplier_mode: RechargeMultiplierMode
   monitor_enabled: boolean
   only_created_key_groups_enabled: boolean
+  use_user_usage_stats: boolean
   last_balance?: number | null
   last_balance_at?: string | null
   today_cost?: number | null

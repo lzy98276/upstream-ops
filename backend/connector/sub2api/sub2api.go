@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lzy98276/upstream-ops/backend/connector"
 	"github.com/go-resty/resty/v2"
+	"github.com/lzy98276/upstream-ops/backend/connector"
 )
 
 func init() {
@@ -210,6 +210,9 @@ func (c *Client) GetBalance(ctx context.Context, ch *connector.Channel, session 
 }
 
 func (c *Client) GetCosts(ctx context.Context, ch *connector.Channel, session *connector.AuthSession) (*connector.CostResult, error) {
+	if ch.UseUserUsageStats {
+		return c.getUserUsageStatsCosts(ctx, ch, session)
+	}
 	body, err := c.getJSON(ctx, strings.TrimRight(ch.SiteURL, "/")+"/api/v1/usage/dashboard/stats", session)
 	if err != nil {
 		return nil, fmt.Errorf("sub2api dashboard stats: %w", err)
@@ -225,6 +228,35 @@ func (c *Client) GetCosts(ctx context.Context, ch *connector.Channel, session *c
 	return &connector.CostResult{
 		TodayCost: connector.ApplyRechargeMultiplier(stats.TodayActualCost, multiplier, ch.RechargeMultiplierMode),
 		TotalCost: connector.ApplyRechargeMultiplier(stats.TotalActualCost, multiplier, ch.RechargeMultiplierMode),
+	}, nil
+}
+
+// getUserUsageStatsCosts follows the user usage page's aggregate endpoint.
+// The upstream API interprets the date range in its own configured timezone.
+func (c *Client) getUserUsageStatsCosts(ctx context.Context, ch *connector.Channel, session *connector.AuthSession) (*connector.CostResult, error) {
+	site := strings.TrimRight(ch.SiteURL, "/")
+	todayBody, err := c.getJSON(ctx, site+"/api/v1/usage/stats?period=today", session)
+	if err != nil {
+		return nil, fmt.Errorf("sub2api user usage today stats: %w", err)
+	}
+	totalBody, err := c.getJSON(ctx, site+"/api/v1/usage/stats?start_date=2000-01-01", session)
+	if err != nil {
+		return nil, fmt.Errorf("sub2api user usage total stats: %w", err)
+	}
+
+	var todayStats, totalStats struct {
+		TotalActualCost float64 `json:"total_actual_cost"`
+	}
+	if err := json.Unmarshal(todayBody, &todayStats); err != nil {
+		return nil, fmt.Errorf("sub2api user usage today stats decode: %w", err)
+	}
+	if err := json.Unmarshal(totalBody, &totalStats); err != nil {
+		return nil, fmt.Errorf("sub2api user usage total stats decode: %w", err)
+	}
+	multiplier := c.rechargeMultiplier(ctx, ch, session)
+	return &connector.CostResult{
+		TodayCost: connector.ApplyRechargeMultiplier(todayStats.TotalActualCost, multiplier, ch.RechargeMultiplierMode),
+		TotalCost: connector.ApplyRechargeMultiplier(totalStats.TotalActualCost, multiplier, ch.RechargeMultiplierMode),
 	}, nil
 }
 

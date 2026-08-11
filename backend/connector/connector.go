@@ -39,6 +39,7 @@ type Channel struct {
 	ProxyURL               string
 	RechargeMultiplier     *float64
 	RechargeMultiplierMode string
+	UseUserUsageStats      bool
 	// TurnstileToken 由调用方在 Login 前预先求解打码后填入；为空则直接发起登录。
 	TurnstileToken string
 }

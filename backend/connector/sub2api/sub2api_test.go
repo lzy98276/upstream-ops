@@ -3,6 +3,7 @@ package sub2api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -112,6 +113,42 @@ func TestGetCosts(t *testing.T) {
 	}, &connector.AuthSession{
 		AccessToken: "token",
 	})
+	if err != nil {
+		t.Fatalf("GetCosts: %v", err)
+	}
+	if res.TodayCost != 1.23 {
+		t.Fatalf("today cost = %v, want 1.23", res.TodayCost)
+	}
+	if res.TotalCost != 45.67 {
+		t.Fatalf("total cost = %v, want 45.67", res.TotalCost)
+	}
+}
+
+func TestGetCostsUsesUserUsageStats(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/usage/stats", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+			t.Fatalf("authorization = %q, want bearer token", got)
+		}
+		var cost float64
+		switch {
+		case r.URL.Query().Get("period") == "today":
+			cost = 1.23
+		case r.URL.Query().Get("start_date") == "2000-01-01" && r.URL.Query().Get("end_date") == "":
+			cost = 45.67
+		default:
+			t.Fatalf("unexpected usage stats query: %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"code":0,"message":"","data":{"total_actual_cost":%v}}`, cost)))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	res, err := New().GetCosts(context.Background(), &connector.Channel{
+		SiteURL:                srv.URL,
+		UseUserUsageStats:      true,
+		RechargeMultiplierMode: connector.RechargeMultiplierModeDivide,
+	}, &connector.AuthSession{AccessToken: "token"})
 	if err != nil {
 		t.Fatalf("GetCosts: %v", err)
 	}

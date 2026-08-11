@@ -10,11 +10,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/lzy98276/upstream-ops/backend/channel"
 	"github.com/lzy98276/upstream-ops/backend/connector"
 	"github.com/lzy98276/upstream-ops/backend/progress"
 	"github.com/lzy98276/upstream-ops/backend/storage"
-	"github.com/gin-gonic/gin"
 )
 
 func registerChannels(g *gin.RouterGroup, d *Deps) {
@@ -49,46 +49,48 @@ func registerChannels(g *gin.RouterGroup, d *Deps) {
 }
 
 type channelInput struct {
-	Name                   string                 `json:"name" binding:"required"`
-	Type                   storage.ChannelType    `json:"type" binding:"required"`
-	SiteURL                string                 `json:"site_url" binding:"required"`
-	Username               string                 `json:"username"`
-	SortOrder              int                    `json:"sort_order"`
-	Password               string                 `json:"password"`
-	CredentialMode         storage.CredentialMode `json:"credential_mode"`
-	TokenCredential        string                 `json:"token_credential"` // JSON：token 模式时填写
-	LoginExtraParams       string                 `json:"login_extra_params"`
-	TurnstileEnabled       bool                   `json:"turnstile_enabled"`
-	IgnoreAnnouncements    bool                   `json:"ignore_announcements"`
-	SubscriptionEnabled    bool                   `json:"subscription_enabled"`
-	ProxyEnabled           bool                   `json:"proxy_enabled"`
-	CaptchaConfigID        *uint                  `json:"captcha_config_id"`
-	BalanceThreshold       float64                `json:"balance_threshold"`
-	RechargeMultiplier     *float64               `json:"recharge_multiplier"`
-	RechargeMultiplierMode string                 `json:"recharge_multiplier_mode"`
-	MonitorEnabled         bool                   `json:"monitor_enabled"`
-	OnlyCreatedKeyGroupsEnabled bool             `json:"only_created_key_groups_enabled"`
+	Name                        string                 `json:"name" binding:"required"`
+	Type                        storage.ChannelType    `json:"type" binding:"required"`
+	SiteURL                     string                 `json:"site_url" binding:"required"`
+	Username                    string                 `json:"username"`
+	SortOrder                   int                    `json:"sort_order"`
+	Password                    string                 `json:"password"`
+	CredentialMode              storage.CredentialMode `json:"credential_mode"`
+	TokenCredential             string                 `json:"token_credential"` // JSON：token 模式时填写
+	LoginExtraParams            string                 `json:"login_extra_params"`
+	TurnstileEnabled            bool                   `json:"turnstile_enabled"`
+	IgnoreAnnouncements         bool                   `json:"ignore_announcements"`
+	SubscriptionEnabled         bool                   `json:"subscription_enabled"`
+	ProxyEnabled                bool                   `json:"proxy_enabled"`
+	CaptchaConfigID             *uint                  `json:"captcha_config_id"`
+	BalanceThreshold            float64                `json:"balance_threshold"`
+	RechargeMultiplier          *float64               `json:"recharge_multiplier"`
+	RechargeMultiplierMode      string                 `json:"recharge_multiplier_mode"`
+	MonitorEnabled              bool                   `json:"monitor_enabled"`
+	OnlyCreatedKeyGroupsEnabled bool                   `json:"only_created_key_groups_enabled"`
+	UseUserUsageStats           bool                   `json:"use_user_usage_stats"`
 }
 
 type channelUpdateInput struct {
-	Name                   *string                 `json:"name"`
-	SiteURL                *string                 `json:"site_url"`
-	Username               *string                 `json:"username"`
-	SortOrder              *int                    `json:"sort_order"`
-	Password               *string                 `json:"password"`
-	CredentialMode         *storage.CredentialMode `json:"credential_mode"`
-	TokenCredential        *string                 `json:"token_credential"`
-	LoginExtraParams       *string                 `json:"login_extra_params"`
-	TurnstileEnabled       *bool                   `json:"turnstile_enabled"`
-	IgnoreAnnouncements    *bool                   `json:"ignore_announcements"`
-	SubscriptionEnabled    *bool                   `json:"subscription_enabled"`
-	ProxyEnabled           *bool                   `json:"proxy_enabled"`
-	CaptchaConfigID        *uint                   `json:"captcha_config_id"`
-	BalanceThreshold       *float64                `json:"balance_threshold"`
-	RechargeMultiplier     *float64                `json:"recharge_multiplier"`
-	RechargeMultiplierMode *string                 `json:"recharge_multiplier_mode"`
-	MonitorEnabled         *bool                   `json:"monitor_enabled"`
-	OnlyCreatedKeyGroupsEnabled *bool             `json:"only_created_key_groups_enabled"`
+	Name                        *string                 `json:"name"`
+	SiteURL                     *string                 `json:"site_url"`
+	Username                    *string                 `json:"username"`
+	SortOrder                   *int                    `json:"sort_order"`
+	Password                    *string                 `json:"password"`
+	CredentialMode              *storage.CredentialMode `json:"credential_mode"`
+	TokenCredential             *string                 `json:"token_credential"`
+	LoginExtraParams            *string                 `json:"login_extra_params"`
+	TurnstileEnabled            *bool                   `json:"turnstile_enabled"`
+	IgnoreAnnouncements         *bool                   `json:"ignore_announcements"`
+	SubscriptionEnabled         *bool                   `json:"subscription_enabled"`
+	ProxyEnabled                *bool                   `json:"proxy_enabled"`
+	CaptchaConfigID             *uint                   `json:"captcha_config_id"`
+	BalanceThreshold            *float64                `json:"balance_threshold"`
+	RechargeMultiplier          *float64                `json:"recharge_multiplier"`
+	RechargeMultiplierMode      *string                 `json:"recharge_multiplier_mode"`
+	MonitorEnabled              *bool                   `json:"monitor_enabled"`
+	OnlyCreatedKeyGroupsEnabled *bool                   `json:"only_created_key_groups_enabled"`
+	UseUserUsageStats           *bool                   `json:"use_user_usage_stats"`
 }
 
 type channelOutput struct {
@@ -156,25 +158,26 @@ func createChannel(c *gin.Context, d *Deps) {
 		return
 	}
 	created, err := d.ChannelSvc.Create(channel.CreateInput{
-		Name:                   in.Name,
-		Type:                   in.Type,
-		SiteURL:                in.SiteURL,
-		Username:               in.Username,
-		SortOrder:              in.SortOrder,
-		Password:               in.Password,
-		CredentialMode:         in.CredentialMode,
-		TokenCredential:        in.TokenCredential,
-		LoginExtraParams:       in.LoginExtraParams,
-		TurnstileEnabled:       in.TurnstileEnabled,
-		IgnoreAnnouncements:    in.IgnoreAnnouncements,
-		SubscriptionEnabled:    in.Type == storage.ChannelTypeSub2API && in.SubscriptionEnabled,
-		ProxyEnabled:           in.ProxyEnabled,
-		CaptchaConfigID:        in.CaptchaConfigID,
-		BalanceThreshold:       in.BalanceThreshold,
-		RechargeMultiplier:     in.RechargeMultiplier,
-		RechargeMultiplierMode: in.RechargeMultiplierMode,
-		MonitorEnabled:         in.MonitorEnabled,
+		Name:                        in.Name,
+		Type:                        in.Type,
+		SiteURL:                     in.SiteURL,
+		Username:                    in.Username,
+		SortOrder:                   in.SortOrder,
+		Password:                    in.Password,
+		CredentialMode:              in.CredentialMode,
+		TokenCredential:             in.TokenCredential,
+		LoginExtraParams:            in.LoginExtraParams,
+		TurnstileEnabled:            in.TurnstileEnabled,
+		IgnoreAnnouncements:         in.IgnoreAnnouncements,
+		SubscriptionEnabled:         in.Type == storage.ChannelTypeSub2API && in.SubscriptionEnabled,
+		ProxyEnabled:                in.ProxyEnabled,
+		CaptchaConfigID:             in.CaptchaConfigID,
+		BalanceThreshold:            in.BalanceThreshold,
+		RechargeMultiplier:          in.RechargeMultiplier,
+		RechargeMultiplierMode:      in.RechargeMultiplierMode,
+		MonitorEnabled:              in.MonitorEnabled,
 		OnlyCreatedKeyGroupsEnabled: in.OnlyCreatedKeyGroupsEnabled,
+		UseUserUsageStats:           in.Type == storage.ChannelTypeSub2API && in.UseUserUsageStats,
 	})
 	if err != nil {
 		fail(c, http.StatusInternalServerError, err)
@@ -257,24 +260,25 @@ func updateChannel(c *gin.Context, d *Deps) {
 		subscriptionEnabled = &enabled
 	}
 	updated, err := d.ChannelSvc.Update(id, channel.UpdateInput{
-		Name:                   in.Name,
-		SiteURL:                in.SiteURL,
-		Username:               in.Username,
-		SortOrder:              in.SortOrder,
-		Password:               in.Password,
-		CredentialMode:         in.CredentialMode,
-		TokenCredential:        in.TokenCredential,
-		LoginExtraParams:       in.LoginExtraParams,
-		TurnstileEnabled:       in.TurnstileEnabled,
-		IgnoreAnnouncements:    in.IgnoreAnnouncements,
-		SubscriptionEnabled:    subscriptionEnabled,
-		ProxyEnabled:           in.ProxyEnabled,
-		CaptchaConfigID:        in.CaptchaConfigID,
-		BalanceThreshold:       in.BalanceThreshold,
-		RechargeMultiplier:     in.RechargeMultiplier,
-		RechargeMultiplierMode: in.RechargeMultiplierMode,
-		MonitorEnabled:         in.MonitorEnabled,
+		Name:                        in.Name,
+		SiteURL:                     in.SiteURL,
+		Username:                    in.Username,
+		SortOrder:                   in.SortOrder,
+		Password:                    in.Password,
+		CredentialMode:              in.CredentialMode,
+		TokenCredential:             in.TokenCredential,
+		LoginExtraParams:            in.LoginExtraParams,
+		TurnstileEnabled:            in.TurnstileEnabled,
+		IgnoreAnnouncements:         in.IgnoreAnnouncements,
+		SubscriptionEnabled:         subscriptionEnabled,
+		ProxyEnabled:                in.ProxyEnabled,
+		CaptchaConfigID:             in.CaptchaConfigID,
+		BalanceThreshold:            in.BalanceThreshold,
+		RechargeMultiplier:          in.RechargeMultiplier,
+		RechargeMultiplierMode:      in.RechargeMultiplierMode,
+		MonitorEnabled:              in.MonitorEnabled,
 		OnlyCreatedKeyGroupsEnabled: in.OnlyCreatedKeyGroupsEnabled,
+		UseUserUsageStats:           in.UseUserUsageStats,
 	})
 	if err != nil {
 		fail(c, http.StatusInternalServerError, err)
