@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bejix/upstream-ops/backend/channel"
-	"github.com/bejix/upstream-ops/backend/connector"
-	"github.com/bejix/upstream-ops/backend/progress"
-	"github.com/bejix/upstream-ops/backend/storage"
+	"github.com/lzy98276/upstream-ops/backend/channel"
+	"github.com/lzy98276/upstream-ops/backend/connector"
+	"github.com/lzy98276/upstream-ops/backend/progress"
+	"github.com/lzy98276/upstream-ops/backend/storage"
 	"github.com/gin-gonic/gin"
 )
 

@@ -14,10 +14,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bejix/upstream-ops/backend/config"
-	"github.com/bejix/upstream-ops/backend/connector"
-	"github.com/bejix/upstream-ops/backend/crypto"
-	"github.com/bejix/upstream-ops/backend/storage"
+	"github.com/lzy98276/upstream-ops/backend/config"
+	"github.com/lzy98276/upstream-ops/backend/connector"
+	"github.com/lzy98276/upstream-ops/backend/crypto"
+	"github.com/lzy98276/upstream-ops/backend/storage"
 )
 
 // 使用记录 attempt_kind

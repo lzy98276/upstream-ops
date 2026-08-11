@@ -14,11 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bejix/upstream-ops/backend/connector"
-	"github.com/bejix/upstream-ops/backend/crypto"
-	"github.com/bejix/upstream-ops/backend/gateway"
-	"github.com/bejix/upstream-ops/backend/notify"
-	"github.com/bejix/upstream-ops/backend/storage"
+	"github.com/lzy98276/upstream-ops/backend/connector"
+	"github.com/lzy98276/upstream-ops/backend/crypto"
+	"github.com/lzy98276/upstream-ops/backend/gateway"
+	"github.com/lzy98276/upstream-ops/backend/notify"
+	"github.com/lzy98276/upstream-ops/backend/storage"
 	"gorm.io/gorm"
 )
 

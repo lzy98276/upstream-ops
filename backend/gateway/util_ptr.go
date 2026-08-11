@@ -4,7 +4,7 @@ package gateway
 import (
 	"strings"
 
-	"github.com/bejix/upstream-ops/backend/connector"
+	"github.com/lzy98276/upstream-ops/backend/connector"
 )
 
 func (svc *Service) findAPIKeyByName(items []connector.APIKey, name string) *connector.APIKey {

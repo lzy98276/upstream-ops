@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bejix/upstream-ops/backend/connector"
-	"github.com/bejix/upstream-ops/backend/storage"
+	"github.com/lzy98276/upstream-ops/backend/connector"
+	"github.com/lzy98276/upstream-ops/backend/storage"
 )
 
 // ParseModelsJSON 解析组 models_json 为清单项。

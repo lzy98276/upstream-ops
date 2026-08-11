@@ -11,7 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/bejix/upstream-ops/backend/config"
+	"github.com/lzy98276/upstream-ops/backend/config"
 )
 
 type usageRecordMeta struct {

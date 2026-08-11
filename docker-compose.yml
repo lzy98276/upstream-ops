@@ -2,7 +2,7 @@ name: upstream-ops
 
 services:
   app:
-    image: ghcr.io/bejix/upstream-ops:${IMAGE_TAG:-latest}
+    image: ghcr.io/lzy98276/upstream-ops:${IMAGE_TAG:-latest}
     restart: unless-stopped
     command: ["-config", "/app/data/config.yaml"]
     environment:

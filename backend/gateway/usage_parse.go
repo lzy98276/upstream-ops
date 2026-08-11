@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/bejix/upstream-ops/backend/gateway/protocol"
+	"github.com/lzy98276/upstream-ops/backend/gateway/protocol"
 )
 
 // 本文件 usage 解析对齐 sub2api：

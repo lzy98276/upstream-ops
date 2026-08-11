@@ -8,7 +8,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/bejix/upstream-ops/backend/storage"
+	"github.com/lzy98276/upstream-ops/backend/storage"
 	"github.com/go-resty/resty/v2"
 )
 

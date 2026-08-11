@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bejix/upstream-ops/backend/connector"
+	"github.com/lzy98276/upstream-ops/backend/connector"
 )
 
 // AdminClient 只封装 Sub2API 管理员接口，使用 x-api-key 鉴权。

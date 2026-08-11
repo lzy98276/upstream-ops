@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/bejix/upstream-ops/backend/config"
+	"github.com/lzy98276/upstream-ops/backend/config"
 )
 
 func TestPricingCatalogSyncsRemoteByHash(t *testing.T) {

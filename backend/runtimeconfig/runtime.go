@@ -7,13 +7,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bejix/upstream-ops/backend/auth"
-	"github.com/bejix/upstream-ops/backend/channel"
-	"github.com/bejix/upstream-ops/backend/config"
-	"github.com/bejix/upstream-ops/backend/gateway"
-	"github.com/bejix/upstream-ops/backend/notify"
-	"github.com/bejix/upstream-ops/backend/scheduler"
 	"github.com/gin-gonic/gin"
+	"github.com/lzy98276/upstream-ops/backend/auth"
+	"github.com/lzy98276/upstream-ops/backend/channel"
+	"github.com/lzy98276/upstream-ops/backend/config"
+	"github.com/lzy98276/upstream-ops/backend/gateway"
+	"github.com/lzy98276/upstream-ops/backend/notify"
+	"github.com/lzy98276/upstream-ops/backend/scheduler"
 )
 
 type SchedulerFactory func(config.SchedulerConfig, config.ProxyConfig) *scheduler.Scheduler

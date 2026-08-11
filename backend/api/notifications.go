@@ -5,8 +5,8 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/bejix/upstream-ops/backend/notify"
-	"github.com/bejix/upstream-ops/backend/storage"
+	"github.com/lzy98276/upstream-ops/backend/notify"
+	"github.com/lzy98276/upstream-ops/backend/storage"
 	"github.com/gin-gonic/gin"
 )
 

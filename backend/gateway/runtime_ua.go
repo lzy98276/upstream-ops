@@ -4,8 +4,8 @@ package gateway
 import (
 	"strings"
 
-	"github.com/bejix/upstream-ops/backend/config"
-	"github.com/bejix/upstream-ops/backend/storage"
+	"github.com/lzy98276/upstream-ops/backend/config"
+	"github.com/lzy98276/upstream-ops/backend/storage"
 )
 
 func (rt *Runtime) defaultUpstreamUserAgent() string {

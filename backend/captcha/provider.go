@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/bejix/upstream-ops/backend/storage"
+	"github.com/lzy98276/upstream-ops/backend/storage"
 )
 
 // Provider 打码平台抽象。所有实现都返回可作为 Turnstile token 的字符串。

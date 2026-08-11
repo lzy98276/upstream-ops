@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/bejix/upstream-ops/backend/gateway/protocol"
-	"github.com/bejix/upstream-ops/backend/storage"
+	"github.com/lzy98276/upstream-ops/backend/gateway/protocol"
+	"github.com/lzy98276/upstream-ops/backend/storage"
 )
 
 func TestApplySystemPromptRulesOrderScopeAndEndpoint(t *testing.T) {

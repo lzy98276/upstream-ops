@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bejix/upstream-ops/backend/connector"
+	"github.com/lzy98276/upstream-ops/backend/connector"
 	"github.com/go-resty/resty/v2"
 )
 

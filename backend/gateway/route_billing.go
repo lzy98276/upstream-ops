@@ -2,8 +2,8 @@
 package gateway
 
 import (
-	"github.com/bejix/upstream-ops/backend/pkg/rateconvert"
-	"github.com/bejix/upstream-ops/backend/storage"
+	"github.com/lzy98276/upstream-ops/backend/pkg/rateconvert"
+	"github.com/lzy98276/upstream-ops/backend/storage"
 )
 
 func (svc *Service) applyProviderRouteBilling(route *storage.GatewayRoute, p *storage.GatewayProvider) {

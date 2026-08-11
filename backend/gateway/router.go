@@ -3,7 +3,7 @@ package gateway
 import (
 	"net/http"
 
-	"github.com/bejix/upstream-ops/backend/gateway/protocol"
+	"github.com/lzy98276/upstream-ops/backend/gateway/protocol"
 	"github.com/gin-gonic/gin"
 )
 

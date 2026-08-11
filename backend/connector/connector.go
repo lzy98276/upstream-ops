@@ -2,8 +2,8 @@
 //
 // 使用方法：
 //
-//	import _ "github.com/bejix/upstream-ops/backend/connector/newapi"
-//	import _ "github.com/bejix/upstream-ops/backend/connector/sub2api"
+//	import _ "github.com/lzy98276/upstream-ops/backend/connector/newapi"
+//	import _ "github.com/lzy98276/upstream-ops/backend/connector/sub2api"
 //
 //	c, err := connector.For("newapi")
 //	session, err := c.Login(ctx, channel)

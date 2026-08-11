@@ -4,7 +4,7 @@ package gateway
 import (
 	"strings"
 
-	"github.com/bejix/upstream-ops/backend/storage"
+	"github.com/lzy98276/upstream-ops/backend/storage"
 )
 
 func (svc *Service) normalizeUpstreamProtocol(v string) string {

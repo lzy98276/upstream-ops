@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bejix/upstream-ops/backend/config"
-	"github.com/bejix/upstream-ops/backend/connector"
-	_ "github.com/bejix/upstream-ops/backend/connector/newapi"
-	"github.com/bejix/upstream-ops/backend/crypto"
-	"github.com/bejix/upstream-ops/backend/storage"
+	"github.com/lzy98276/upstream-ops/backend/config"
+	"github.com/lzy98276/upstream-ops/backend/connector"
+	_ "github.com/lzy98276/upstream-ops/backend/connector/newapi"
+	"github.com/lzy98276/upstream-ops/backend/crypto"
+	"github.com/lzy98276/upstream-ops/backend/storage"
 )
 
 type fakeHTTPConfigConnector struct {

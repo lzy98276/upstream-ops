@@ -1,7 +1,7 @@
 // 管理面与鉴权相关输入输出 DTO。
 package gateway
 
-import "github.com/bejix/upstream-ops/backend/storage"
+import "github.com/lzy98276/upstream-ops/backend/storage"
 
 // AuthResult 鉴权结果：命中的网关密钥及其所属分组。
 type AuthResult struct {

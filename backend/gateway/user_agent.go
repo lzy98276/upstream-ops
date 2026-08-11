@@ -4,8 +4,8 @@ package gateway
 import (
 	"strings"
 
-	"github.com/bejix/upstream-ops/backend/config"
-	"github.com/bejix/upstream-ops/backend/storage"
+	"github.com/lzy98276/upstream-ops/backend/config"
+	"github.com/lzy98276/upstream-ops/backend/storage"
 )
 
 // NormalizeUserAgentMode 归一化路由 UA 策略；非法/空 → passthrough。

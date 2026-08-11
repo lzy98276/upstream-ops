@@ -290,7 +290,7 @@ ADMIN_USERNAME=admin
 ADMIN_PASSWORD=请替换为强密码
 ```
 
-Docker 默认拉取 `ghcr.io/bejix/upstream-ops:${IMAGE_TAG:-latest}`，不会在本机编译镜像。配置和数据都会写入宿主机项目目录下的 `data/`。
+Docker 默认拉取 `ghcr.io/lzy98276/upstream-ops:${IMAGE_TAG:-latest}`，不会在本机编译镜像。配置和数据都会写入宿主机项目目录下的 `data/`。
 
 启动：
 

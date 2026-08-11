@@ -1,7 +1,7 @@
 // 上游转发目标（baseURL / key / channel / provider）。
 package gateway
 
-import "github.com/bejix/upstream-ops/backend/storage"
+import "github.com/lzy98276/upstream-ops/backend/storage"
 
 type upstreamTarget struct {
 	BaseURL  string

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/bejix/upstream-ops/backend/connector"
-	"github.com/bejix/upstream-ops/backend/storage"
+	"github.com/lzy98276/upstream-ops/backend/connector"
+	"github.com/lzy98276/upstream-ops/backend/storage"
 )
 
 // ListRoutes 列出路由（库内顺序，不实时拉上游）。

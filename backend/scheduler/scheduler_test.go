@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bejix/upstream-ops/backend/config"
-	"github.com/bejix/upstream-ops/backend/monitor"
-	"github.com/bejix/upstream-ops/backend/storage"
+	"github.com/lzy98276/upstream-ops/backend/config"
+	"github.com/lzy98276/upstream-ops/backend/monitor"
+	"github.com/lzy98276/upstream-ops/backend/storage"
 	"gorm.io/gorm"
 )
 

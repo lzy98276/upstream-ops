@@ -3,7 +3,7 @@ package api
 import (
 	"net/http"
 
-	"github.com/bejix/upstream-ops/backend/config"
+	"github.com/lzy98276/upstream-ops/backend/config"
 	"github.com/gin-gonic/gin"
 )
 

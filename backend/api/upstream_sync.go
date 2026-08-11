@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/bejix/upstream-ops/backend/syncer"
+	"github.com/lzy98276/upstream-ops/backend/syncer"
 	"github.com/gin-gonic/gin"
 )
 

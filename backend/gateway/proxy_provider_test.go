@@ -5,8 +5,8 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/bejix/upstream-ops/backend/config"
-	"github.com/bejix/upstream-ops/backend/storage"
+	"github.com/lzy98276/upstream-ops/backend/config"
+	"github.com/lzy98276/upstream-ops/backend/storage"
 )
 
 func TestProxyURLForTarget_Provider(t *testing.T) {
