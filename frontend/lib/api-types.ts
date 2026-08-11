@@ -322,6 +322,9 @@ export interface AppVersion {
   update_available?: boolean
   repo_url?: string
   release_url?: string
+  release_name?: string
+  release_notes?: string
+  published_at?: string
   update_error?: string
 }
 

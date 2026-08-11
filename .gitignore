@@ -68,3 +68,4 @@ cmd/seed-demo/
 frontend/tsconfig.tsbuildinfo
 
 docs/md
+/frontend

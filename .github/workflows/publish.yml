@@ -20,7 +20,7 @@ on:
         default: ''
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 env:
@@ -81,6 +81,12 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" --generate-notes --title "${GITHUB_REF_NAME}"
 
       - name: Summary
         run: |

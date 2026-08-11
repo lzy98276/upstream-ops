@@ -9,7 +9,7 @@ import type {
   RateSnapshot,
 } from "@/lib/api-types"
 
-export type MainTab = "gateway" | "providers" | "usage" | "prices"
+export type MainTab = "gateway" | "providers" | "usage" | "upstream-sync" | "prices"
 export type ConfigTab = "keys" | "routes" | "models" | "service-tier" | "prompt"
 
 export type ModelSourceLabel = {

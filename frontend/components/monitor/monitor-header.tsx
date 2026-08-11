@@ -34,6 +34,7 @@ import { useTriggerRefresh } from "@/lib/refresh-context"
 import { useAppVersion, useChannels } from "@/lib/queries"
 import type { AppVersion } from "@/lib/api-types"
 import { relativeTime } from "@/lib/format"
+import { UpdateDialog } from "@/components/monitor/update-dialog"
 import { toast } from "sonner"
 
 export function MonitorHeader() {
@@ -46,12 +47,12 @@ export function MonitorHeader() {
   const [mounted, setMounted] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [checkingVersion, setCheckingVersion] = useState(false)
+  const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
 
   const appTitle = appVersion.data?.title?.trim() || "UpstreamOps"
   const version = appVersion.data?.version?.trim()
   const latestVersion = appVersion.data?.latest_version?.trim()
   const updateAvailable = Boolean(appVersion.data?.update_available && latestVersion)
-  const updateURL = appVersion.data?.release_url?.trim() || appVersion.data?.repo_url?.trim()
 
   useEffect(() => setMounted(true), [])
 
@@ -93,7 +94,9 @@ export function MonitorHeader() {
         toast.error(result.update_error)
       } else if (result.update_available && result.latest_version) {
         toast.warning(`发现新版本 ${result.latest_version}`)
+        setUpdateDialogOpen(true)
       } else {
+        setUpdateDialogOpen(false)
         toast.success("当前已是最新版本")
       }
     } catch (err) {
@@ -129,14 +132,13 @@ export function MonitorHeader() {
                   {checkingVersion ? "检测中..." : `v${version}`}
                 </button>
                 {updateAvailable ? (
-                  <a
-                    href={updateURL || "https://github.com/lzy98276/upstream-ops"}
-                    target="_blank"
-                    rel="noopener noreferrer"
+                  <button
+                    type="button"
+                    onClick={() => setUpdateDialogOpen(true)}
                     className="ml-1.5 font-medium text-emerald-600 underline-offset-2 hover:text-emerald-700 hover:underline sm:ml-2"
                   >
                     有新版本 {latestVersion}
-                  </a>
+                  </button>
                 ) : null}
               </p>
             ) : null}
@@ -356,6 +358,13 @@ export function MonitorHeader() {
           </div>
         </div>
       </div>
+      <UpdateDialog
+        open={updateDialogOpen}
+        onOpenChange={setUpdateDialogOpen}
+        version={appVersion.data}
+        checking={checkingVersion}
+        onCheck={handleCheckVersion}
+      />
     </header>
   )
 }

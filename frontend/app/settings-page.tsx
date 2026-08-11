@@ -32,7 +32,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { CaptchaFormDialog } from "@/components/monitor/captcha-form-dialog";
 import { NotificationFormDialog } from "@/components/monitor/notification-form-dialog";
-import { UpstreamSyncSettings } from "@/components/settings/upstream-sync-settings";
 import { apiFetch } from "@/lib/api";
 import { useTriggerRefresh } from "@/lib/refresh-context";
 import type {
@@ -345,10 +344,6 @@ export default function SettingsPage() {
           </TabsTrigger>
           <TabsTrigger value="captcha" className="px-4 py-2">
             验证码服务
-          </TabsTrigger>
-          <TabsTrigger value="upstream-sync" className="px-4 py-2">
-            <Workflow className="size-3.5" />
-            上游动态同步
           </TabsTrigger>
         </TabsList>
 
@@ -1589,9 +1584,6 @@ export default function SettingsPage() {
           </SectionCard>
         </TabsContent>
 
-        <TabsContent value="upstream-sync">
-          <UpstreamSyncSettings />
-        </TabsContent>
       </Tabs>
 
       <NotificationFormDialog

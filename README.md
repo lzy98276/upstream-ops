@@ -279,6 +279,25 @@ ADMIN_PASSWORD=replace-with-a-strong-password
 
 Docker pulls `ghcr.io/lzy98276/upstream-ops:${IMAGE_TAG:-latest}` by default. Configuration and data are stored in the host `data/` directory.
 
+### Updates
+
+The app indicates when a new release is available and provides the matching Docker Compose update commands. You can also update from the deployment directory manually:
+
+```bash
+docker compose pull app
+docker compose up -d app
+```
+
+To pin a specific release, replace `vX.Y.Z` with the target version:
+
+```bash
+export IMAGE_TAG=vX.Y.Z
+docker compose pull app
+docker compose up -d app
+```
+
+Updating recreates the application container while preserving configuration and SQLite data under `data/`. The application applies database migrations when it starts, but back up `data/` before updating.
+
 Start:
 
 ```bash
@@ -310,7 +329,7 @@ IMAGE_TAG=latest
 For production, pin a specific version:
 
 ```env
-IMAGE_TAG=v0.0.8
+IMAGE_TAG=v0.1.0
 ```
 
 ## MySQL Deployment

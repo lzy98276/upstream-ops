@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lzy98276/upstream-ops/backend/global"
 	"github.com/gin-gonic/gin"
+	"github.com/lzy98276/upstream-ops/backend/global"
 )
 
 func TestIsVersionNewer(t *testing.T) {
@@ -32,7 +32,7 @@ func TestIsVersionNewer(t *testing.T) {
 func TestVersionEndpointReportsUpdate(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	withGitHubReleaseServer(t, http.StatusOK, `{"tag_name":"v999.0.0","html_url":"https://github.com/lzy98276/upstream-ops/releases/tag/v999.0.0"}`)
+	withGitHubReleaseServer(t, http.StatusOK, `{"tag_name":"v999.0.0","name":"Version 999","body":"- Important fix","published_at":"2026-08-11T00:00:00Z","html_url":"https://github.com/lzy98276/upstream-ops/releases/tag/v999.0.0"}`)
 	resp := requestVersion(t)
 
 	if !resp.UpdateAvailable {
@@ -43,6 +43,9 @@ func TestVersionEndpointReportsUpdate(t *testing.T) {
 	}
 	if resp.ReleaseURL == "" {
 		t.Fatalf("release_url is empty")
+	}
+	if resp.ReleaseName != "Version 999" || resp.ReleaseNotes != "- Important fix" || resp.PublishedAt != "2026-08-11T00:00:00Z" {
+		t.Fatalf("release metadata = %#v, want latest release metadata", resp)
 	}
 }
 

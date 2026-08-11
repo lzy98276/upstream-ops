@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/lzy98276/upstream-ops/backend/config"
 	"github.com/lzy98276/upstream-ops/backend/global"
-	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -34,12 +34,26 @@ type versionResponse struct {
 	UpdateAvailable bool   `json:"update_available"`
 	RepoURL         string `json:"repo_url"`
 	ReleaseURL      string `json:"release_url"`
+	ReleaseName     string `json:"release_name"`
+	ReleaseNotes    string `json:"release_notes"`
+	PublishedAt     string `json:"published_at"`
 	UpdateError     string `json:"update_error"`
 }
 
 type githubReleaseResponse struct {
-	TagName string `json:"tag_name"`
-	HTMLURL string `json:"html_url"`
+	TagName     string `json:"tag_name"`
+	Name        string `json:"name"`
+	Body        string `json:"body"`
+	PublishedAt string `json:"published_at"`
+	HTMLURL     string `json:"html_url"`
+}
+
+type latestGitHubRelease struct {
+	Version     string
+	URL         string
+	Name        string
+	Notes       string
+	PublishedAt string
 }
 
 func registerVersion(api *gin.RouterGroup, d *Deps) {
@@ -66,14 +80,17 @@ func buildVersionResponse(ctx context.Context, d *Deps, force bool) versionRespo
 		RepoURL: githubRepoURL,
 	}
 
-	latest, releaseURL, err := fetchLatestGitHubRelease(ctx, versionCheckClient(proxyCfg, force))
+	release, err := fetchLatestGitHubRelease(ctx, versionCheckClient(proxyCfg, force))
 	if err != nil {
 		resp.UpdateError = err.Error()
 		return resp
 	}
-	resp.LatestVersion = latest
-	resp.ReleaseURL = releaseURL
-	resp.UpdateAvailable = isVersionNewer(latest, global.VERSION)
+	resp.LatestVersion = release.Version
+	resp.ReleaseURL = release.URL
+	resp.ReleaseName = release.Name
+	resp.ReleaseNotes = release.Notes
+	resp.PublishedAt = release.PublishedAt
+	resp.UpdateAvailable = isVersionNewer(release.Version, global.VERSION)
 	return resp
 }
 
@@ -97,38 +114,44 @@ func versionCheckClient(proxyCfg config.ProxyConfig, force bool) *http.Client {
 	}
 }
 
-func fetchLatestGitHubRelease(ctx context.Context, client *http.Client) (string, string, error) {
+func fetchLatestGitHubRelease(ctx context.Context, client *http.Client) (*latestGitHubRelease, error) {
 	if client == nil {
 		client = githubReleaseClient
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubLatestReleaseURL, nil)
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "upstream-ops")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", "", fmt.Errorf("github latest release status %d", resp.StatusCode)
+		return nil, fmt.Errorf("github latest release status %d", resp.StatusCode)
 	}
 
 	var release githubReleaseResponse
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", "", err
+		return nil, err
 	}
 	if strings.TrimSpace(release.TagName) == "" {
-		return "", "", errors.New("github latest release missing tag_name")
+		return nil, errors.New("github latest release missing tag_name")
 	}
 	if strings.TrimSpace(release.HTMLURL) == "" {
 		release.HTMLURL = githubRepoURL
 	}
-	return release.TagName, release.HTMLURL, nil
+	return &latestGitHubRelease{
+		Version:     release.TagName,
+		URL:         release.HTMLURL,
+		Name:        release.Name,
+		Notes:       release.Body,
+		PublishedAt: release.PublishedAt,
+	}, nil
 }
 
 func isVersionNewer(latest, current string) bool {

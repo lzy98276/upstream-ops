@@ -292,6 +292,25 @@ ADMIN_PASSWORD=请替换为强密码
 
 Docker 默认拉取 `ghcr.io/lzy98276/upstream-ops:${IMAGE_TAG:-latest}`，不会在本机编译镜像。配置和数据都会写入宿主机项目目录下的 `data/`。
 
+### 更新
+
+应用顶部会提示已发布的新版本，并提供对应的 Docker Compose 更新命令。也可以在项目目录手动执行：
+
+```bash
+docker compose pull app
+docker compose up -d app
+```
+
+如需固定到某个发布版本，将命令中的 `vX.Y.Z` 替换为目标版本：
+
+```bash
+export IMAGE_TAG=vX.Y.Z
+docker compose pull app
+docker compose up -d app
+```
+
+更新会重新创建应用容器，但会保留挂载在 `data/` 目录中的配置和 SQLite 数据。数据库升级由应用启动时的迁移流程处理；更新前仍建议备份 `data/`。
+
 启动：
 
 ```bash
@@ -323,7 +342,7 @@ IMAGE_TAG=latest
 生产环境建议锁定具体版本，例如：
 
 ```env
-IMAGE_TAG=v0.0.8
+IMAGE_TAG=v0.1.0
 ```
 
 ## MySQL 部署

@@ -11,6 +11,7 @@ import {
   KeyRound,
   MessageSquareText,
   SlidersHorizontal,
+  Workflow,
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -54,6 +55,7 @@ import { UsagePanel } from "./usage-panel"
 import { PricesPanel } from "./prices-panel"
 import { PromptInjectionPanel } from "./prompt-injection-panel"
 import { ServiceTierPolicyPanel } from "./service-tier-policy-panel"
+import { UpstreamSyncSettings } from "../settings/upstream-sync-settings"
 import {
   CreatedSecretDialog,
   DefaultsPriceDialog,
@@ -1492,6 +1494,9 @@ export function GatewayPage() {
           <TabsTrigger value="usage" className="gap-1.5 px-4 py-2">
             <ScrollText className="size-3.5" /> 使用记录
           </TabsTrigger>
+          <TabsTrigger value="upstream-sync" className="gap-1.5 px-4 py-2">
+            <Workflow className="size-3.5" /> 上游动态同步
+          </TabsTrigger>
           <TabsTrigger value="prices" className="gap-1.5 px-4 py-2">
             <DollarSign className="size-3.5" /> 价格覆盖
           </TabsTrigger>
@@ -1717,6 +1722,10 @@ export function GatewayPage() {
             refreshUsage={refreshUsage}
             goUsagePage={goUsagePage}
           />
+        </TabsContent>
+
+        <TabsContent value="upstream-sync" className="mt-0 space-y-4">
+          <UpstreamSyncSettings />
         </TabsContent>
 
         <TabsContent value="prices" className="mt-0 space-y-4">
