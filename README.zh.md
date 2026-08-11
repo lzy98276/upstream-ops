@@ -77,7 +77,7 @@ UpstreamOps 主要解决这些痛点：
   - OpenAI Chat ↔ Anthropic Messages
   - OpenAI Chat ↔ OpenAI Responses
   - Anthropic ↔ OpenAI Responses
-  - 路由 `upstream_protocol`：`auto` / `openai`（Chat）/ `openai_responses` / `anthropic`
+  - 路由 `upstream_protocol`：`auto` / `openai`（Chat）/ `openai_responses` / `anthropic` / `gemini`
 - 故障转移：网络错误、429、5xx 临时暂停并顺延；组可开「4xx 顺延」；支持组级重试次数、最大切换次数、冷却秒数。
 - **首字超时**（可选）：在仍有可顺延路由时，对首字节等待限时，加速切换到下一条路由。
 - User-Agent：路由级 `passthrough` / `group` / `custom`；管理侧拉模型、探测会回落默认 UA。
@@ -935,6 +935,7 @@ x-api-key: sk-...
 - `openai` / `openai_chat`：上游 Chat Completions
 - `openai_responses`：上游 Responses
 - `anthropic`：上游 Messages
+- `gemini`：Google Gemini。Base URL 填 `https://generativelanguage.googleapis.com`（也可包含 `/v1beta`）；网关会请求 `/v1beta/models/{model}:generateContent`，流式请求使用 `:streamGenerateContent?alt=sse`，并以 `x-goog-api-key` 传递 API Key。
 
 ### 调度与计费倍率
 

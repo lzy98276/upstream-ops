@@ -11,7 +11,7 @@ const (
 	KindOpenAIChat      Kind = "openai_chat"      // /v1/chat/completions · messages
 	KindOpenAIResponses Kind = "openai_responses" // /v1/responses · input
 	KindAnthropic       Kind = "anthropic"        // /v1/messages
-	KindGemini          Kind = "gemini"           // /v1beta/models/:action
+	KindGemini          Kind = "gemini"           // /v1beta/models/{model}:generateContent
 	KindAuto            Kind = "auto"
 )
 

@@ -73,7 +73,7 @@ UpstreamOps focuses on these problems:
   - OpenAI Chat ↔ Anthropic Messages
   - OpenAI Chat ↔ OpenAI Responses
   - Anthropic ↔ OpenAI Responses
-  - Per-route `upstream_protocol`: `auto` / `openai` (Chat) / `openai_responses` / `anthropic`
+  - Per-route `upstream_protocol`: `auto` / `openai` (Chat) / `openai_responses` / `anthropic` / `gemini`
 - Failover on network errors, 429, and 5xx with temporary pause; optional “failover on 4xx”; group-level retry count, max switches, and cooldown.
 - **First-token timeout** (optional): fail fast on the first byte when another route can still be tried.
 - User-Agent modes: `passthrough` / `group` / `custom`; admin model pull and probe fall back to the default UA.
@@ -778,6 +778,7 @@ Route field `upstream_protocol`:
 - `openai` / `openai_chat`: upstream Chat Completions
 - `openai_responses`: upstream Responses
 - `anthropic`: upstream Messages
+- `gemini`: Google Gemini. Use `https://generativelanguage.googleapis.com` as the Base URL (a `/v1beta` suffix is also accepted). The gateway calls `/v1beta/models/{model}:generateContent`; streaming uses `:streamGenerateContent?alt=sse`, authenticated with `x-goog-api-key`.
 
 ### Scheduling and billing ratio
 

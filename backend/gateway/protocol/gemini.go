@@ -50,7 +50,8 @@ func GeminiPath(model, inboundPath string, stream bool) string {
 	if stream && action == "generateContent" {
 		action = "streamGenerateContent"
 	}
-	path := "/v1beta/models/" + url.PathEscape(strings.TrimSpace(model)) + ":" + action
+	model = strings.TrimPrefix(strings.TrimSpace(model), "models/")
+	path := "/v1beta/models/" + url.PathEscape(model) + ":" + action
 	if action == "streamGenerateContent" {
 		return path + "?alt=sse"
 	}

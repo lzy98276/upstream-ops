@@ -447,7 +447,7 @@ const (
 	GatewayUpstreamProtocolOpenAIChat      = "openai_chat"      // /v1/chat/completions · messages
 	GatewayUpstreamProtocolOpenAIResponses = "openai_responses" // /v1/responses · input
 	GatewayUpstreamProtocolAnthropic       = "anthropic"        // /v1/messages
-	GatewayUpstreamProtocolGemini          = "gemini"           // /v1beta/models/:action · contents
+	GatewayUpstreamProtocolGemini          = "gemini"           // /v1beta/models/{model}:generateContent · contents
 
 	// GatewayRoute 上游来源：监控渠道 vs 直连提供商（base+key）
 	GatewayRouteSourceMonitor  = "monitor"
