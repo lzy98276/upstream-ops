@@ -311,6 +311,13 @@ docker compose up -d app
 
 更新会重新创建应用容器，但会保留挂载在 `data/` 目录中的配置和 SQLite 数据。数据库升级由应用启动时的迁移流程处理；更新前仍建议备份 `data/`。
 
+发布新版本时不需要修改本地版本文件，镜像构建会直接使用 Git 标签覆盖应用版本：
+
+```bash
+git tag v0.1.2
+git push origin main v0.1.2
+```
+
 启动：
 
 ```bash

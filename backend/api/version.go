@@ -19,10 +19,12 @@ import (
 const (
 	githubRepoURL              = "https://github.com/lzy98276/upstream-ops"
 	defaultGitHubLatestRelease = "https://api.github.com/repos/lzy98276/upstream-ops/releases/latest"
+	defaultGitHubTagsURL       = "https://api.github.com/repos/lzy98276/upstream-ops/tags?per_page=100"
 )
 
 var (
 	githubLatestReleaseURL = defaultGitHubLatestRelease
+	githubTagsURL          = defaultGitHubTagsURL
 	githubReleaseClient    = &http.Client{Timeout: 2 * time.Second}
 )
 
@@ -46,6 +48,10 @@ type githubReleaseResponse struct {
 	Body        string `json:"body"`
 	PublishedAt string `json:"published_at"`
 	HTMLURL     string `json:"html_url"`
+}
+
+type githubTagResponse struct {
+	Name string `json:"name"`
 }
 
 type latestGitHubRelease struct {
@@ -131,6 +137,9 @@ func fetchLatestGitHubRelease(ctx context.Context, client *http.Client) (*latest
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		return fetchLatestGitHubTag(ctx, client)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("github latest release status %d", resp.StatusCode)
 	}
@@ -154,24 +163,70 @@ func fetchLatestGitHubRelease(ctx context.Context, client *http.Client) (*latest
 	}, nil
 }
 
-func isVersionNewer(latest, current string) bool {
-	lv, ok := parseVersion(latest)
-	if !ok {
-		return false
+// fetchLatestGitHubTag is used for repositories that publish container images
+// from Git tags but have not created GitHub Release objects yet.
+func fetchLatestGitHubTag(ctx context.Context, client *http.Client) (*latestGitHubRelease, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubTagsURL, nil)
+	if err != nil {
+		return nil, err
 	}
-	cv, ok := parseVersion(current)
-	if !ok {
-		return false
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "upstream-ops")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("github tags status %d", resp.StatusCode)
+	}
+
+	var tags []githubTagResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+		return nil, err
+	}
+
+	latest := ""
+	for _, tag := range tags {
+		if _, ok := parseVersion(tag.Name); !ok {
+			continue
+		}
+		if latest == "" || compareVersions(tag.Name, latest) > 0 {
+			latest = tag.Name
+		}
+	}
+	if latest == "" {
+		return nil, errors.New("github tags contain no semantic version")
+	}
+
+	return &latestGitHubRelease{
+		Version: latest,
+		URL:     githubRepoURL + "/tree/" + url.PathEscape(strings.TrimSpace(latest)),
+		Name:    latest,
+	}, nil
+}
+
+func isVersionNewer(latest, current string) bool {
+	return compareVersions(latest, current) > 0
+}
+
+func compareVersions(left, right string) int {
+	lv, lok := parseVersion(left)
+	rv, rok := parseVersion(right)
+	if !lok || !rok {
+		return 0
 	}
 	for i := range lv {
-		if lv[i] > cv[i] {
-			return true
+		if lv[i] > rv[i] {
+			return 1
 		}
-		if lv[i] < cv[i] {
-			return false
+		if lv[i] < rv[i] {
+			return -1
 		}
 	}
-	return false
+	return 0
 }
 
 func parseVersion(v string) ([3]int, bool) {

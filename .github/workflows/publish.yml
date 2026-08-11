@@ -18,6 +18,10 @@ on:
         description: '额外推送的镜像 tag（可选，如 dev-test）'
         required: false
         default: ''
+      release_tag:
+        description: '手动补发 GitHub Release 的已有标签（可选，如 v0.1.0）'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -60,12 +64,27 @@ jobs:
             type=ref,event=tag
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
             type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
+            type=raw,value=${{ inputs.release_tag }},enable=${{ inputs.release_tag != '' }}
             type=sha,prefix=sha-,format=short
           flavor: |
             latest=false
+
+      - name: Resolve application version
+        id: app-version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          elif [[ "$RELEASE_TAG" == v* ]]; then
+            echo "value=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=edge" >> "$GITHUB_OUTPUT"
+          fi
 
       # 多架构构建 + 推送。GitHub Actions 内置 cache (type=gha) 把
       # 前端 pnpm install 和后端 go mod download 都缓存住，二次构建 1-2 分钟。
@@ -81,12 +100,24 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
+          build-args: |
+            APP_VERSION=${{ steps.app-version.outputs.value }}
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" --generate-notes --title "${GITHUB_REF_NAME}"
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "release_tag must look like v0.1.0" >&2
+            exit 1
+          fi
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists"
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "$RELEASE_TAG"
+          fi
 
       - name: Summary
         run: |

@@ -80,6 +80,41 @@ func TestVersionEndpointKeepsResponseOnGitHubError(t *testing.T) {
 	}
 }
 
+func TestVersionEndpointFallsBackToLatestTagWhenReleaseIsMissing(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "tags") {
+			_, _ = w.Write([]byte(`[{"name":"v999.0.0"},{"name":"v0.0.13-lzy"},{"name":"not-a-version"}]`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	oldReleaseURL := githubLatestReleaseURL
+	oldTagsURL := githubTagsURL
+	oldClient := githubReleaseClient
+	githubLatestReleaseURL = srv.URL + "/releases/latest"
+	githubTagsURL = srv.URL + "/tags"
+	githubReleaseClient = srv.Client()
+	t.Cleanup(func() {
+		githubLatestReleaseURL = oldReleaseURL
+		githubTagsURL = oldTagsURL
+		githubReleaseClient = oldClient
+	})
+
+	resp := requestVersion(t)
+	if !resp.UpdateAvailable || resp.LatestVersion != "v999.0.0" {
+		t.Fatalf("tag fallback response = %#v, want v999.0.0 update", resp)
+	}
+	if resp.ReleaseNotes != "" {
+		t.Fatalf("tag fallback release notes = %q, want empty", resp.ReleaseNotes)
+	}
+}
+
 func withGitHubReleaseServer(t *testing.T, status int, body string) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -298,6 +298,13 @@ docker compose up -d app
 
 Updating recreates the application container while preserving configuration and SQLite data under `data/`. The application applies database migrations when it starts, but back up `data/` before updating.
 
+Before publishing a release, you do not need to edit a local version file. The image build injects the application version directly from the Git tag:
+
+```bash
+git tag v0.1.2
+git push origin main v0.1.2
+```
+
 Start:
 
 ```bash

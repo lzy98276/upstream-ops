@@ -30,6 +30,7 @@ RUN pnpm build
 # ---------- Stage 2: 后端 ----------
 FROM golang:1.23-alpine AS go-builder
 WORKDIR /src
+ARG APP_VERSION=edge
 
 # 先 go.mod / go.sum 走缓存
 COPY go.mod go.sum ./
@@ -44,7 +45,7 @@ COPY --from=frontend-builder /web/dist ./web/dist
 
 RUN CGO_ENABLED=0 GOOS=linux go build \
         -trimpath \
-        -ldflags="-s -w" \
+        -ldflags="-s -w -X github.com/lzy98276/upstream-ops/backend/global.VERSION=${APP_VERSION}" \
         -o /out/upstream-ops \
         ./cmd/server
 
