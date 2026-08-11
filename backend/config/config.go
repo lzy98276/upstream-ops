@@ -174,16 +174,16 @@ type PricingConfig struct {
 }
 
 const (
-	DefaultPricingRemoteURL = "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.json"
-	DefaultPricingHashURL   = "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.sha256"
+	// LiteLLM maintains the broadest public provider/model price catalog. It
+	// does not publish a companion SHA256 file, so normal refreshes use the
+	// configured interval rather than a hash probe.
+	DefaultPricingRemoteURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+	DefaultPricingHashURL   = ""
 )
 
 func (p PricingConfig) WithDefaults() PricingConfig {
 	if strings.TrimSpace(p.RemoteURL) == "" {
 		p.RemoteURL = DefaultPricingRemoteURL
-	}
-	if strings.TrimSpace(p.HashURL) == "" {
-		p.HashURL = DefaultPricingHashURL
 	}
 	if strings.TrimSpace(p.DataDir) == "" {
 		p.DataDir = "./data"

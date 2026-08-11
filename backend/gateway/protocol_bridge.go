@@ -26,7 +26,13 @@ func (svc *Service) prepareUpstreamRequest(
 	in := protocol.NormalizeKind(inbound)
 	up := protocol.NormalizeKind(upstream)
 	upstreamPath = protocol.PathFor(up, inboundPath)
-	fwd = RewriteModelInBody(body, model)
+	if up == protocol.KindGemini {
+		upstreamPath = protocol.GeminiPath(model, inboundPath, stream)
+	}
+	fwd = body
+	if in != protocol.KindGemini {
+		fwd = RewriteModelInBody(body, model)
+	}
 	if !protocol.NeedsBodyConvert(in, up) {
 		// 同形态：仍可能需要改 path（例如入站 chat、上游 responses 不走这里）
 		if protocol.IsOpenAIFamily(in) && protocol.IsOpenAIFamily(up) &&

@@ -113,12 +113,14 @@ func main() {
 	gatewayProviders := storage.NewGatewayProviders(db)
 	gatewayUsage := storage.NewGatewayUsageLogs(db)
 	modelPrices := storage.NewModelPriceOverrides(db)
+	modelPriceSources := storage.NewModelPriceSources(db)
 
 	channelSvc := channel.NewService(channels, authSessions, captchas, rates, monLogs, cipher)
 	channelSvc.UpdateProxyConfig(cfg.Proxy)
 	channelSvc.UpdateUpstreamConfig(cfg.Upstream)
 	gatewaySvc := gateway.NewService(gatewayGroups, gatewayKeys, gatewayRoutes, gatewayUsage, modelPrices, channels, channelSvc, cipher, log)
 	gatewaySvc.SetProviders(gatewayProviders)
+	gatewaySvc.SetPriceSources(modelPriceSources)
 	gatewaySvc.UpdateProxyConfig(cfg.Proxy)
 	gatewaySvc.UpdateUpstreamConfig(cfg.Upstream)
 	gatewaySvc.UpdateGatewayConfig(cfg.Gateway)
@@ -184,27 +186,28 @@ func main() {
 	}
 
 	api.Register(router, &api.Deps{
-		DB:            db,
-		Cipher:        cipher,
-		Runtime:       runtimeMgr,
-		Channels:      channels,
-		Sessions:      authSessions,
-		Captchas:      captchas,
-		Notifies:      notifies,
-		Announcements: announcements,
-		Rates:         rates,
-		MonLogs:       monLogs,
-		ChannelSvc:    channelSvc,
-		Monitor:       monitorSvc,
-		Dispatcher:    dispatcher,
-		UpstreamSync:  syncSvc,
-		Gateway:       gatewaySvc,
-		GatewayGroups: gatewayGroups,
-		GatewayKeys:   gatewayKeys,
-		GatewayUsage:  gatewayUsage,
-		ModelPrices:   modelPrices,
-		Log:           log,
-		Frontend:      frontendFS,
+		DB:                db,
+		Cipher:            cipher,
+		Runtime:           runtimeMgr,
+		Channels:          channels,
+		Sessions:          authSessions,
+		Captchas:          captchas,
+		Notifies:          notifies,
+		Announcements:     announcements,
+		Rates:             rates,
+		MonLogs:           monLogs,
+		ChannelSvc:        channelSvc,
+		Monitor:           monitorSvc,
+		Dispatcher:        dispatcher,
+		UpstreamSync:      syncSvc,
+		Gateway:           gatewaySvc,
+		GatewayGroups:     gatewayGroups,
+		GatewayKeys:       gatewayKeys,
+		GatewayUsage:      gatewayUsage,
+		ModelPrices:       modelPrices,
+		ModelPriceSources: modelPriceSources,
+		Log:               log,
+		Frontend:          frontendFS,
 	})
 
 	srv := &http.Server{

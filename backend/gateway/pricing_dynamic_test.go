@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/lzy98276/upstream-ops/backend/config"
+	"github.com/lzy98276/upstream-ops/backend/storage"
 )
 
 func TestPricingCatalogSyncsRemoteByHash(t *testing.T) {
@@ -47,6 +48,44 @@ func TestPricingCatalogSyncsRemoteByHash(t *testing.T) {
 	}
 	if got := catalog.Resolve("remote-model"); got.InputPricePerToken != 3e-6 || got.OutputPricePerToken != 4e-6 {
 		t.Fatalf("updated remote price = %+v", got)
+	}
+}
+
+func TestPricingCatalogCustomLiteLLMSourceOverridesDefault(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/custom.json" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"grok-4.5":{"input_cost_per_token":0.000009,"output_cost_per_token":0.000011},"custom-only":{"input_cost_per_token":0.000003,"output_cost_per_token":0.000004}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	db := openGatewayTestDB(t)
+	sources := storage.NewModelPriceSources(db)
+	source := &storage.ModelPriceSource{
+		Name: "test-custom", URL: server.URL + "/custom.json", Enabled: true, Priority: 200,
+	}
+	if err := sources.Create(source); err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+
+	catalog := NewPricingCatalog(nil, sources)
+	if err := catalog.SyncManagedSource(source.ID); err != nil {
+		t.Fatalf("sync source: %v", err)
+	}
+	if got := catalog.Resolve("grok-4.5"); got.InputPricePerToken != 9e-6 || got.OutputPricePerToken != 11e-6 {
+		t.Fatalf("custom source did not override grok price: %+v", got)
+	}
+	if got := catalog.Resolve("custom-only"); got.InputPricePerToken != 3e-6 || got.OutputPricePerToken != 4e-6 {
+		t.Fatalf("custom-only price = %+v", got)
+	}
+	stored, err := sources.FindByID(source.ID)
+	if err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	if stored.ModelCount != 2 || stored.LastSyncedAt == nil || stored.LastError != "" {
+		t.Fatalf("source sync metadata = %+v", stored)
 	}
 }
 

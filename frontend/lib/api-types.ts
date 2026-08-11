@@ -636,13 +636,14 @@ export interface GatewaySystemPromptRule {
   key_scope: "all" | "selected"
   key_ids: number[]
 }
-/** 上游协议：auto / OpenAI Chat / OpenAI Responses / Anthropic；openai 为 chat 历史别名 */
+/** 上游协议：auto / OpenAI Chat / OpenAI Responses / Anthropic / Gemini；openai 为 chat 历史别名 */
 export type GatewayUpstreamProtocol =
   | "auto"
   | "openai"
   | "openai_chat"
   | "openai_responses"
   | "anthropic"
+  | "gemini"
 
 export interface GatewayGroup {
   id: number
@@ -660,6 +661,8 @@ export interface GatewayGroup {
   model_mapping?: string
   models_json?: string
   models_mode: GatewayModelsMode
+  /** 成功同步模型后开启：只向声明支持映射后模型的路由发送请求。 */
+  model_routing_enabled?: boolean
   service_tier_rules_json?: string
   system_prompt_rules_json?: string
   /** 重试总开关：关闭则失败直接回显，不重试不顺延 */
@@ -767,6 +770,10 @@ export interface GatewayRoute {
   billing_rate_multiplier: number
   enabled: boolean
   model_mapping?: string
+  /** 本路由最近一次模型同步得到的原始上游模型 ID。 */
+  supported_models_json?: string
+  models_synced_at?: string | null
+  models_sync_error?: string
   upstream_protocol: GatewayUpstreamProtocol
   concurrency: number
   /** 透传 / 组 UA / 自定义；默认透传 */
@@ -996,6 +1003,20 @@ export interface ModelPriceOverride {
   video_price_720p: number
   video_price_1080p: number
   enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+/** 自定义 LiteLLM 价格源，较高 priority 覆盖较低 priority 与官方目录。 */
+export interface ModelPriceSource {
+  id: number
+  name: string
+  url: string
+  enabled: boolean
+  priority: number
+  last_synced_at?: string | null
+  last_error?: string
+  model_count: number
   created_at: string
   updated_at: string
 }

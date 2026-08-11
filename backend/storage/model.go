@@ -446,6 +446,7 @@ const (
 	GatewayUpstreamProtocolOpenAIChat      = "openai_chat"      // /v1/chat/completions · messages
 	GatewayUpstreamProtocolOpenAIResponses = "openai_responses" // /v1/responses · input
 	GatewayUpstreamProtocolAnthropic       = "anthropic"        // /v1/messages
+	GatewayUpstreamProtocolGemini          = "gemini"           // /v1beta/models/:action · contents
 
 	// GatewayRoute 上游来源：监控渠道 vs 直连提供商（base+key）
 	GatewayRouteSourceMonitor  = "monitor"
@@ -453,6 +454,7 @@ const (
 
 	GatewayProviderAuthBearer  = "bearer"
 	GatewayProviderAuthXAPIKey = "x-api-key"
+	GatewayProviderAuthGoogle  = "google-api-key"
 	GatewayProviderAuthBoth    = "both"
 
 	// 路由 User-Agent 策略（组级统一 UA + 路由三选一）：
@@ -507,6 +509,9 @@ type GatewayGroup struct {
 	ModelMappingJSON  string `gorm:"type:text" json:"model_mapping,omitempty"`
 	ModelsJSON        string `gorm:"type:text" json:"models_json,omitempty"`
 	ModelsMode        string `gorm:"size:16;not null;default:'auto'" json:"models_mode"`
+	// ModelRoutingEnabled is turned on after a successful model sync. Before the
+	// first sync, legacy groups keep their existing rate-only route behavior.
+	ModelRoutingEnabled bool `gorm:"not null;default:false" json:"model_routing_enabled"`
 	// ServiceTierRulesJSON 保存 OpenAI service_tier 的组级处理规则。
 	// 规则只在 OpenAI Chat / Responses 入站请求中生效。
 	ServiceTierRulesJSON string `gorm:"type:text" json:"service_tier_rules_json,omitempty"`
@@ -577,8 +582,14 @@ type GatewayRoute struct {
 	BillingRateMultiplier float64 `gorm:"not null;default:1" json:"billing_rate_multiplier"`
 	Enabled               bool    `gorm:"default:true" json:"enabled"`
 	ModelMappingJSON      string  `gorm:"type:text" json:"model_mapping,omitempty"`
-	UpstreamProtocol      string  `gorm:"size:16;not null;default:'auto'" json:"upstream_protocol"`
-	Concurrency           int     `gorm:"default:10" json:"concurrency"`
+	// SupportedModelsJSON stores the raw model IDs returned by this specific
+	// upstream route. It is intentionally separate from group.ModelsJSON,
+	// which is only the client-facing aggregate list.
+	SupportedModelsJSON string     `gorm:"type:text" json:"supported_models_json,omitempty"`
+	ModelsSyncedAt      *time.Time `json:"models_synced_at,omitempty"`
+	ModelsSyncError     string     `gorm:"type:text" json:"models_sync_error,omitempty"`
+	UpstreamProtocol    string     `gorm:"size:16;not null;default:'auto'" json:"upstream_protocol"`
+	Concurrency         int        `gorm:"default:10" json:"concurrency"`
 	// UserAgentMode: passthrough | group | custom（见 GatewayUserAgentMode*）
 	UserAgentMode string `gorm:"size:16;not null;default:'passthrough'" json:"user_agent_mode"`
 	// UserAgentCustom 仅 mode=custom 时生效；转发/模型测试/拉模型共用。
@@ -719,3 +730,21 @@ type ModelPriceOverride struct {
 }
 
 func (ModelPriceOverride) TableName() string { return "model_price_overrides" }
+
+// ModelPriceSource is an administrator-managed LiteLLM-compatible pricing
+// document. Sources are applied after the bundled LiteLLM catalog; a larger
+// priority wins when several sources provide the same model.
+type ModelPriceSource struct {
+	ID           uint       `gorm:"primaryKey" json:"id"`
+	Name         string     `gorm:"size:128;uniqueIndex;not null" json:"name"`
+	URL          string     `gorm:"type:text;not null" json:"url"`
+	Enabled      bool       `gorm:"not null;default:true" json:"enabled"`
+	Priority     int        `gorm:"not null;default:100" json:"priority"`
+	LastSyncedAt *time.Time `json:"last_synced_at,omitempty"`
+	LastError    string     `gorm:"type:text" json:"last_error,omitempty"`
+	ModelCount   int        `gorm:"not null;default:0" json:"model_count"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+func (ModelPriceSource) TableName() string { return "model_price_sources" }

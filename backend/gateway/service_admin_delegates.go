@@ -87,6 +87,23 @@ func (s *Service) DeleteProvider(id uint) error {
 	return s.admin().DeleteProvider(id)
 }
 
+// ListPriceSources returns managed LiteLLM-compatible pricing documents.
+func (s *Service) ListPriceSources() ([]storage.ModelPriceSource, error) {
+	return s.admin().ListPriceSources()
+}
+
+func (s *Service) CreatePriceSource(in CreatePriceSourceInput) (*storage.ModelPriceSource, error) {
+	return s.admin().CreatePriceSource(in)
+}
+
+func (s *Service) UpdatePriceSource(id uint, in UpdatePriceSourceInput) (*storage.ModelPriceSource, error) {
+	return s.admin().UpdatePriceSource(id, in)
+}
+
+func (s *Service) DeletePriceSource(id uint) error {
+	return s.admin().DeletePriceSource(id)
+}
+
 // RevealProviderKey 解密并返回直连渠道 API Key 明文。
 func (s *Service) RevealProviderKey(id uint) (string, error) {
 	return s.admin().RevealProviderKey(id)
@@ -134,7 +151,8 @@ func (s *Service) ClearRoutePause(routeID uint) error {
 }
 
 func (s *Service) collectGroupModels(ctx context.Context, groupID uint) (preview []ModelPreviewItem, routeResults []ModelSyncRouteResult, err error) {
-	return s.admin().collectGroupModels(ctx, groupID)
+	preview, routeResults, _, err = s.admin().collectGroupModels(ctx, groupID)
+	return preview, routeResults, err
 }
 
 func (s *Service) pullRouteModels(ctx context.Context, group *storage.GatewayGroup, route storage.GatewayRoute) routeModelPull {

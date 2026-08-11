@@ -385,6 +385,9 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 				list[i].TempUnschedulableAt = prev.TempUnschedulableAt
 				list[i].TempUnschedulableRequestID = prev.TempUnschedulableRequestID
 				list[i].RecoverSuccessStreak = prev.RecoverSuccessStreak
+				list[i].SupportedModelsJSON = prev.SupportedModelsJSON
+				list[i].ModelsSyncedAt = prev.ModelsSyncedAt
+				list[i].ModelsSyncError = prev.ModelsSyncError
 				list[i].CreatedAt = prev.CreatedAt
 			} else {
 				list[i].SourceAPIKeyID = 0
@@ -395,6 +398,9 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 				list[i].TempUnschedulableAt = nil
 				list[i].TempUnschedulableRequestID = ""
 				list[i].RecoverSuccessStreak = 0
+				list[i].SupportedModelsJSON = ""
+				list[i].ModelsSyncedAt = nil
+				list[i].ModelsSyncError = ""
 			}
 
 			if hasPrev {
@@ -419,6 +425,17 @@ func (r *GatewayRoutes) SaveForGroup(groupID uint, list []GatewayRoute) error {
 		}
 		return nil
 	})
+}
+
+// UpdateModelCapabilities persists the raw upstream model list discovered for
+// one route. A failed sync deliberately clears the list so strict groups never
+// send a model to a route whose current capabilities are unknown.
+func (r *GatewayRoutes) UpdateModelCapabilities(id uint, modelsJSON string, syncedAt *time.Time, syncErr string) error {
+	return r.db.Model(&GatewayRoute{}).Where("id = ?", id).Updates(map[string]any{
+		"supported_models_json": modelsJSON,
+		"models_synced_at":      syncedAt,
+		"models_sync_error":     syncErr,
+	}).Error
 }
 
 func normalizeGatewayRoute(item *GatewayRoute) {
@@ -468,6 +485,7 @@ func normalizeGatewayRoute(item *GatewayRoute) {
 	case GatewayUpstreamProtocolOpenAIChat,
 		GatewayUpstreamProtocolOpenAIResponses,
 		GatewayUpstreamProtocolAnthropic,
+		GatewayUpstreamProtocolGemini,
 		GatewayUpstreamProtocolAuto:
 		item.UpstreamProtocol = up
 	case "responses":
@@ -1237,4 +1255,66 @@ func (r *ModelPriceOverrides) ListEnabledMap() (map[string]ModelPriceOverride, e
 		out[item.ModelName] = item
 	}
 	return out, nil
+}
+
+// ModelPriceSources stores administrator-managed LiteLLM pricing documents.
+type ModelPriceSources struct{ db *gorm.DB }
+
+func NewModelPriceSources(db *gorm.DB) *ModelPriceSources {
+	return &ModelPriceSources{db: db}
+}
+
+func (r *ModelPriceSources) List() ([]ModelPriceSource, error) {
+	var list []ModelPriceSource
+	err := r.db.Order("priority asc, id asc").Find(&list).Error
+	return list, err
+}
+
+func (r *ModelPriceSources) ListEnabled() ([]ModelPriceSource, error) {
+	var list []ModelPriceSource
+	err := r.db.Where("enabled = ?", true).Order("priority asc, id asc").Find(&list).Error
+	return list, err
+}
+
+func (r *ModelPriceSources) FindByID(id uint) (*ModelPriceSource, error) {
+	var item ModelPriceSource
+	if err := r.db.First(&item, id).Error; err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (r *ModelPriceSources) FindByName(name string) (*ModelPriceSource, error) {
+	var item ModelPriceSource
+	if err := r.db.Where("name = ?", name).First(&item).Error; err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (r *ModelPriceSources) Create(item *ModelPriceSource) error {
+	return r.db.Create(item).Error
+}
+
+func (r *ModelPriceSources) Update(item *ModelPriceSource) error {
+	return r.db.Save(item).Error
+}
+
+func (r *ModelPriceSources) Delete(id uint) error {
+	return r.db.Delete(&ModelPriceSource{}, id).Error
+}
+
+func (r *ModelPriceSources) UpdateSyncResult(id uint, syncedAt *time.Time, lastErr string, modelCount int) error {
+	return r.db.Model(&ModelPriceSource{}).Where("id = ?", id).Updates(map[string]any{
+		"last_synced_at": syncedAt,
+		"last_error":     lastErr,
+		"model_count":    modelCount,
+	}).Error
+}
+
+func (r *ModelPriceSources) UpdateSyncError(id uint, lastErr string, modelCount int) error {
+	return r.db.Model(&ModelPriceSource{}).Where("id = ?", id).Updates(map[string]any{
+		"last_error": lastErr,
+		"model_count": modelCount,
+	}).Error
 }

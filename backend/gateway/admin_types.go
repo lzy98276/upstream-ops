@@ -3,6 +3,23 @@ package gateway
 
 import "github.com/lzy98276/upstream-ops/backend/storage"
 
+// CreatePriceSourceInput defines a custom LiteLLM pricing document. The URL
+// must return the same JSON schema as LiteLLM's
+// model_prices_and_context_window.json.
+type CreatePriceSourceInput struct {
+	Name     string `json:"name"`
+	URL      string `json:"url"`
+	Enabled  *bool  `json:"enabled"`
+	Priority int    `json:"priority"`
+}
+
+type UpdatePriceSourceInput struct {
+	Name     *string `json:"name"`
+	URL      *string `json:"url"`
+	Enabled  *bool   `json:"enabled"`
+	Priority *int    `json:"priority"`
+}
+
 // AuthResult 鉴权结果：命中的网关密钥及其所属分组。
 type AuthResult struct {
 	Key   *storage.GatewayKey

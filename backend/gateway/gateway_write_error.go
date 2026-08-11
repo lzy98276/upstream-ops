@@ -67,6 +67,17 @@ func (svc *Service) writeGatewayError(c *gin.Context, kind protocolKind, status 
 		})
 		return
 	}
+	if protocol.NormalizeKind(kind) == protocol.KindGemini {
+		c.JSON(status, gin.H{
+			"error": gin.H{
+				"code":    status,
+				"status":  http.StatusText(status),
+				"message": msg,
+			},
+			jsonKeyUpstreamOpsRequestID: reqID,
+		})
+		return
+	}
 	c.JSON(status, gin.H{
 		"error": gin.H{
 			"message": msg,

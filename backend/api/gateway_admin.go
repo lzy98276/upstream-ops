@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/lzy98276/upstream-ops/backend/gateway"
 	"github.com/lzy98276/upstream-ops/backend/storage"
-	"github.com/gin-gonic/gin"
 )
 
 // registerGatewayAdmin 在管理 API 下注册 /gateway/* 路由。
@@ -70,6 +70,11 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 		gp.GET("/prices/defaults", func(c *gin.Context) { listGatewayDefaultPrices(c, d) })
 		gp.PUT("/prices", func(c *gin.Context) { upsertGatewayPrice(c, d) })
 		gp.DELETE("/prices/:id", func(c *gin.Context) { deleteGatewayPrice(c, d) })
+		gp.GET("/price-sources", func(c *gin.Context) { listGatewayPriceSources(c, d) })
+		gp.POST("/price-sources", func(c *gin.Context) { createGatewayPriceSource(c, d) })
+		gp.PUT("/price-sources/:id", func(c *gin.Context) { updateGatewayPriceSource(c, d) })
+		gp.DELETE("/price-sources/:id", func(c *gin.Context) { deleteGatewayPriceSource(c, d) })
+		gp.POST("/price-sources/:id/sync", func(c *gin.Context) { syncGatewayPriceSource(c, d) })
 	}
 }
 
@@ -721,6 +726,94 @@ func deleteGatewayPrice(c *gin.Context, d *Deps) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func listGatewayPriceSources(c *gin.Context, d *Deps) {
+	items, err := d.Gateway.ListPriceSources()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func createGatewayPriceSource(c *gin.Context, d *Deps) {
+	var in gateway.CreatePriceSourceInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	item, err := d.Gateway.CreatePriceSource(in)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, item)
+}
+
+func updateGatewayPriceSource(c *gin.Context, d *Deps) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	var in gateway.UpdatePriceSourceInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	item, err := d.Gateway.UpdatePriceSource(id, in)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// Priority/enabled changes take effect immediately. A changed URL drops the
+	// old document until the administrator explicitly syncs the new source.
+	if in.URL != nil {
+		d.Gateway.DropPriceSource(id)
+	} else {
+		d.Gateway.RefreshPriceSourceOrder()
+	}
+	c.JSON(http.StatusOK, item)
+}
+
+func deleteGatewayPriceSource(c *gin.Context, d *Deps) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	if err := d.Gateway.DeletePriceSource(id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	// Drop a deleted source from the in-memory catalog immediately.
+	d.Gateway.DropPriceSource(id)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func syncGatewayPriceSource(c *gin.Context, d *Deps) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	if err := d.Gateway.SyncPriceSource(id); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	items, err := d.Gateway.ListPriceSources()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	for _, item := range items {
+		if item.ID == id {
+			c.JSON(http.StatusOK, item)
+			return
+		}
+	}
+	c.JSON(http.StatusNotFound, gin.H{"error": "pricing source not found"})
 }
 
 func parseUintParam(c *gin.Context, name string) (uint, error) {

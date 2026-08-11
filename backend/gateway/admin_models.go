@@ -10,25 +10,25 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/lzy98276/upstream-ops/backend/gateway/protocol"
 	"github.com/lzy98276/upstream-ops/backend/storage"
-	"github.com/gin-gonic/gin"
 )
 
 func (a *AdminService) collectGroupModels(
 	ctx context.Context,
 	groupID uint,
-) (preview []ModelPreviewItem, routeResults []ModelSyncRouteResult, err error) {
+) (preview []ModelPreviewItem, routeResults []ModelSyncRouteResult, routeModels map[uint][]string, err error) {
 	group, err := a.Groups.FindByID(groupID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	routes, err := a.Routes.ListByGroupID(groupID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if len(routes) == 0 {
-		return nil, nil, nil
+		return nil, nil, map[uint][]string{}, nil
 	}
 
 	// 多路由并发 GET /v1/models；结果按下标写回，合并阶段再串行去重。
@@ -66,9 +66,14 @@ func (a *AdminService) collectGroupModels(
 	}
 
 	byModel := map[string]map[string]ModelSource{}
+	routeModels = make(map[uint][]string, len(pulls))
 	routeResults = make([]ModelSyncRouteResult, 0, len(pulls))
+	groupMapping := ParseModelMapping(group.ModelMappingJSON)
 	for i, pull := range pulls {
 		routeResults = append(routeResults, pull.rr)
+		if pull.rr.OK {
+			routeModels[routes[i].ID] = pull.models
+		}
 		if !pull.merge {
 			continue
 		}
@@ -76,15 +81,21 @@ func (a *AdminService) collectGroupModels(
 		srcKey := fmt.Sprintf("%d:%d:%d:%v:%s",
 			pull.src.RouteID, pull.src.ChannelID, route.GatewayProviderID,
 			pull.src.SourceGroupID, pull.src.SourceGroupName)
+		routeMapping := ParseModelMapping(route.ModelMappingJSON)
 		for _, m := range pull.models {
 			m = strings.TrimSpace(m)
 			if m == "" {
 				continue
 			}
-			if _, ok := byModel[m]; !ok {
-				byModel[m] = map[string]ModelSource{}
+			// The synced list is upstream-facing. Publish mapped client IDs so a
+			// client can request the model name configured in the gateway group.
+			publicIDs := mappedClientModelIDs(m, routeMapping, groupMapping)
+			for _, publicID := range publicIDs {
+				if _, ok := byModel[publicID]; !ok {
+					byModel[publicID] = map[string]ModelSource{}
+				}
+				byModel[publicID][srcKey] = pull.src
 			}
-			byModel[m][srcKey] = pull.src
 		}
 	}
 
@@ -100,7 +111,7 @@ func (a *AdminService) collectGroupModels(
 			Sources:    sources,
 		})
 	}
-	return preview, routeResults, nil
+	return preview, routeResults, routeModels, nil
 }
 
 // pullRouteModels 单路由拉取上游模型清单（禁用/缺密钥记 skip，HTTP 失败记 error）。
@@ -141,14 +152,9 @@ func (a *AdminService) pullRouteModels(ctx context.Context, group *storage.Gatew
 		if rr.Label == "" {
 			rr.Label = fmt.Sprintf("直连 #%d", route.GatewayProviderID)
 		}
-		// 用 provider base + key 拉 /v1/models
-		pseudo := &storage.Channel{
-			ID:      0,
-			Name:    rr.Label,
-			SiteURL: target.BaseURL,
-		}
+		target.UserAgentOverride = ua
 		var fetchErr error
-		models, fetchErr = a.fetchUpstreamModels(ctx, pseudo, target.APIKey, ua)
+		models, fetchErr = a.runtime().fetchRouteModels(ctx, target, route.UpstreamProtocol)
 		if fetchErr != nil {
 			rr.Error = fetchErr.Error()
 			return routeModelPull{rr: rr}
@@ -172,8 +178,14 @@ func (a *AdminService) pullRouteModels(ctx context.Context, group *storage.Gatew
 			rr.SkipReason = "未确保上游密钥"
 			return routeModelPull{rr: rr}
 		}
+		target, resolveErr := a.resolveUpstreamTarget(&route)
+		if resolveErr != nil {
+			rr.Error = resolveErr.Error()
+			return routeModelPull{rr: rr}
+		}
+		target.UserAgentOverride = ua
 		var fetchErr error
-		models, fetchErr = a.fetchUpstreamModels(ctx, ch, secret, ua)
+		models, fetchErr = a.runtime().fetchRouteModels(ctx, target, route.UpstreamProtocol)
 		if fetchErr != nil {
 			rr.Error = fetchErr.Error()
 			return routeModelPull{rr: rr}
@@ -194,7 +206,7 @@ func (a *AdminService) pullRouteModels(ctx context.Context, group *storage.Gatew
 
 // PreviewGroupModels 预览聚合模型。
 func (a *AdminService) PreviewGroupModels(ctx context.Context, groupID uint) ([]ModelPreviewItem, error) {
-	preview, _, err := a.collectGroupModels(ctx, groupID)
+	preview, _, _, err := a.collectGroupModels(ctx, groupID)
 	return preview, err
 }
 
@@ -206,9 +218,30 @@ func (a *AdminService) SyncGroupModels(ctx context.Context, groupID uint, in Syn
 		return nil, err
 	}
 	// 失败路由跳过，成功的照常合并；整体仅在读库/写库失败时返回 error
-	preview, routeResults, err := a.collectGroupModels(ctx, groupID)
+	preview, routeResults, routeModels, err := a.collectGroupModels(ctx, groupID)
 	if err != nil {
 		return nil, err
+	}
+	// A synced route is a routing contract, not merely a display source. Clear
+	// failed routes so model-aware failover never selects a stale/unknown route.
+	now := time.Now()
+	hasSuccessfulSync := false
+	for _, result := range routeResults {
+		modelsJSON := "[]"
+		var syncedAt *time.Time
+		syncErr := strings.TrimSpace(result.Error)
+		if result.Skipped {
+			syncErr = strings.TrimSpace(result.SkipReason)
+		}
+		if result.OK {
+			hasSuccessfulSync = true
+			modelsJSON = routeModelsJSONString(routeModels[result.RouteID])
+			syncedAt = &now
+			syncErr = ""
+		}
+		if err := a.Routes.UpdateModelCapabilities(result.RouteID, modelsJSON, syncedAt, syncErr); err != nil {
+			return nil, err
+		}
 	}
 	existing := a.ParseModelsJSON(group.ModelsJSON)
 	custom := make([]ModelListItem, 0)
@@ -252,6 +285,13 @@ func (a *AdminService) SyncGroupModels(ctx context.Context, groupID uint, in Syn
 		merged = append(merged, c)
 	}
 	group.ModelsJSON = a.ModelsJSONString(merged)
+	// Keep legacy groups schedulable until at least one route has actually
+	// completed a model sync. Once strict routing is enabled it stays enabled:
+	// failed routes above have had their capability lists cleared, so they
+	// cannot receive unknown models during failover.
+	if hasSuccessfulSync {
+		group.ModelRoutingEnabled = true
+	}
 	if err := a.Groups.Update(group); err != nil {
 		return nil, err
 	}

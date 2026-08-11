@@ -102,6 +102,12 @@ type PricingCatalog struct {
 	defaults  map[string]ModelPricing
 	fallbacks map[string]ModelPricing
 	overrides *storage.ModelPriceOverrides
+	sources   *storage.ModelPriceSources
+	// custom contains the last successfully parsed document for each managed
+	// source. A failed refresh retains its last good data rather than making
+	// billing suddenly lose a model price.
+	custom      map[uint]map[string]ModelPricing
+	customOrder []uint
 
 	runMu  sync.Mutex
 	stopCh chan struct{}
@@ -112,11 +118,17 @@ type PricingCatalog struct {
 	hash   string
 }
 
-func NewPricingCatalog(overrides *storage.ModelPriceOverrides) *PricingCatalog {
+func NewPricingCatalog(overrides *storage.ModelPriceOverrides, sources ...*storage.ModelPriceSources) *PricingCatalog {
+	var sourceRepo *storage.ModelPriceSources
+	if len(sources) > 0 {
+		sourceRepo = sources[0]
+	}
 	c := &PricingCatalog{
 		defaults:  map[string]ModelPricing{},
 		fallbacks: map[string]ModelPricing{},
 		overrides: overrides,
+		sources:   sourceRepo,
+		custom:    map[uint]map[string]ModelPricing{},
 	}
 	c.loadDefaults(defaultPricesJSON)
 	c.seedFallbackPrices()
@@ -124,9 +136,23 @@ func NewPricingCatalog(overrides *storage.ModelPriceOverrides) *PricingCatalog {
 }
 
 func (c *PricingCatalog) loadDefaults(body []byte) error {
+	defaults, err := parseLiteLLMPrices(body)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.defaults = defaults
+	c.mu.Unlock()
+	return nil
+}
+
+// parseLiteLLMPrices accepts LiteLLM's model_prices_and_context_window.json.
+// Keeping parsing separate lets the built-in source and custom sources share
+// exactly the same schema and validation rules.
+func parseLiteLLMPrices(body []byte) (map[string]ModelPricing, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return err
+		return nil, err
 	}
 	defaults := make(map[string]ModelPricing, len(raw))
 	for name, rawEntry := range raw {
@@ -195,10 +221,10 @@ func (c *PricingCatalog) loadDefaults(body []byte) error {
 		p.ModelName = key
 		defaults[key] = p
 	}
-	c.mu.Lock()
-	c.defaults = defaults
-	c.mu.Unlock()
-	return nil
+	if len(defaults) == 0 {
+		return nil, fmt.Errorf("no LiteLLM model price entries found")
+	}
+	return defaults, nil
 }
 
 // Start 启动远程价目同步。启动失败不会影响内置价目表；后续定时任务会继续重试。
@@ -230,6 +256,9 @@ func (c *PricingCatalog) Start(cfg config.PricingConfig, log *slog.Logger) {
 	if err := c.sync(); err != nil {
 		c.logError("initial pricing sync failed; using cached or embedded prices", err)
 	}
+	if err := c.syncManagedSources(0); err != nil {
+		c.logError("initial custom pricing source sync failed", err)
+	}
 
 	interval := time.Duration(cfg.HashCheckIntervalMinutes) * time.Minute
 	c.wg.Add(1)
@@ -242,6 +271,9 @@ func (c *PricingCatalog) Start(cfg config.PricingConfig, log *slog.Logger) {
 			case <-ticker.C:
 				if err := c.sync(); err != nil {
 					c.logError("pricing sync failed", err)
+				}
+				if err := c.syncManagedSources(0); err != nil {
+					c.logError("custom pricing source sync failed", err)
 				}
 			case <-stopCh:
 				return
@@ -266,25 +298,27 @@ func (c *PricingCatalog) Stop() {
 }
 
 func (c *PricingCatalog) pricingFilePath() string {
-	return filepath.Join(c.cfg.DataDir, "model_prices_and_context_window.json")
+	return filepath.Join(c.cfg.DataDir, "litellm_model_prices_and_context_window.json")
 }
 
 func (c *PricingCatalog) hashFilePath() string {
-	return filepath.Join(c.cfg.DataDir, "model_prices_and_context_window.sha256")
+	return filepath.Join(c.cfg.DataDir, "litellm_model_prices_and_context_window.sha256")
 }
 
 func (c *PricingCatalog) loadCached() error {
 	c.runMu.Lock()
 	cfg := c.cfg
 	c.runMu.Unlock()
-	body, err := os.ReadFile(filepath.Join(cfg.DataDir, "model_prices_and_context_window.json"))
+	pricingPath := filepath.Join(cfg.DataDir, "litellm_model_prices_and_context_window.json")
+	hashPath := filepath.Join(cfg.DataDir, "litellm_model_prices_and_context_window.sha256")
+	body, err := os.ReadFile(pricingPath)
 	if err != nil {
 		return err
 	}
 	if err := c.loadDefaults(body); err != nil {
 		return fmt.Errorf("parse cached pricing: %w", err)
 	}
-	hash, err := os.ReadFile(filepath.Join(cfg.DataDir, "model_prices_and_context_window.sha256"))
+	hash, err := os.ReadFile(hashPath)
 	if err != nil {
 		sum := sha256.Sum256(body)
 		c.mu.Lock()
@@ -363,6 +397,129 @@ func (c *PricingCatalog) download(client *http.Client, remoteHash string) error 
 	return nil
 }
 
+// SyncManagedSource refreshes one administrator-managed LiteLLM source. A
+// zero id refreshes all enabled sources and is used by the periodic worker.
+func (c *PricingCatalog) SyncManagedSource(id uint) error {
+	return c.syncManagedSources(id)
+}
+
+func (c *PricingCatalog) DropManagedSource(id uint) {
+	if c == nil || id == 0 {
+		return
+	}
+	c.mu.Lock()
+	delete(c.custom, id)
+	for i, sourceID := range c.customOrder {
+		if sourceID == id {
+			c.customOrder = append(c.customOrder[:i], c.customOrder[i+1:]...)
+			break
+		}
+	}
+	c.mu.Unlock()
+}
+
+func (c *PricingCatalog) RefreshManagedSourceOrder() {
+	if c == nil || c.sources == nil {
+		return
+	}
+	list, err := c.sources.ListEnabled()
+	if err != nil {
+		return
+	}
+	order := make([]uint, 0, len(list))
+	for _, source := range list {
+		order = append(order, source.ID)
+	}
+	c.mu.Lock()
+	c.customOrder = order
+	c.mu.Unlock()
+}
+
+func (c *PricingCatalog) syncManagedSources(id uint) error {
+	if c == nil || c.sources == nil {
+		return nil
+	}
+	var (
+		list []storage.ModelPriceSource
+		err  error
+	)
+	if id > 0 {
+		item, findErr := c.sources.FindByID(id)
+		if findErr != nil {
+			return findErr
+		}
+		if !item.Enabled {
+			return fmt.Errorf("pricing source %q is disabled", item.Name)
+		}
+		list = []storage.ModelPriceSource{*item}
+	} else {
+		list, err = c.sources.ListEnabled()
+		if err != nil {
+			return err
+		}
+	}
+
+	c.runMu.Lock()
+	client := c.client
+	c.runMu.Unlock()
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+
+	var errs []string
+	active := make(map[uint]struct{}, len(list))
+	order := make([]uint, 0, len(list))
+	for _, source := range list {
+		active[source.ID] = struct{}{}
+		order = append(order, source.ID)
+		body, fetchErr := c.fetchBytes(client, source.URL, 30*time.Second)
+		if fetchErr != nil {
+			_ = c.sources.UpdateSyncError(source.ID, fetchErr.Error(), source.ModelCount)
+			errs = append(errs, source.Name+": "+fetchErr.Error())
+			continue
+		}
+		prices, parseErr := parseLiteLLMPrices(body)
+		if parseErr != nil {
+			_ = c.sources.UpdateSyncError(source.ID, parseErr.Error(), source.ModelCount)
+			errs = append(errs, source.Name+": "+parseErr.Error())
+			continue
+		}
+		now := time.Now()
+		if updateErr := c.sources.UpdateSyncResult(source.ID, &now, "", len(prices)); updateErr != nil {
+			errs = append(errs, source.Name+": persist sync status: "+updateErr.Error())
+		}
+		c.mu.Lock()
+		c.custom[source.ID] = prices
+		c.mu.Unlock()
+	}
+	if id == 0 {
+		c.mu.Lock()
+		c.customOrder = order
+		for existingID := range c.custom {
+			if _, ok := active[existingID]; !ok {
+				delete(c.custom, existingID)
+			}
+		}
+		c.mu.Unlock()
+	} else {
+		// A newly created source can be synced before the periodic worker has
+		// seen it. Rebuild the precedence order so it takes effect immediately.
+		if enabled, listErr := c.sources.ListEnabled(); listErr == nil {
+			order = order[:0]
+			for _, source := range enabled {
+				order = append(order, source.ID)
+			}
+			c.mu.Lock()
+			c.customOrder = order
+			c.mu.Unlock()
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("%s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
 func (c *PricingCatalog) fetchBytes(client *http.Client, rawURL string, timeout time.Duration) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -378,7 +535,15 @@ func (c *PricingCatalog) fetchBytes(client *http.Client, rawURL string, timeout 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	const maxPricingDocumentBytes = 32 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPricingDocumentBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxPricingDocumentBytes {
+		return nil, fmt.Errorf("pricing document exceeds %d MiB", maxPricingDocumentBytes>>20)
+	}
+	return body, nil
 }
 
 func (c *PricingCatalog) fetchText(client *http.Client, rawURL string, timeout time.Duration) (string, error) {
@@ -495,6 +660,13 @@ func (c *PricingCatalog) ListDefaults(query string) []DefaultPriceItem {
 	for k, v := range c.defaults {
 		merged[k] = v
 	}
+	// Managed sources are intentionally applied after the official LiteLLM
+	// catalog. Their order is priority ascending, so a larger priority wins.
+	for _, id := range c.customOrder {
+		for name, pricing := range c.custom[id] {
+			merged[name] = pricing
+		}
+	}
 	// fallback 仅在 defaults 未覆盖时展示
 	for k, v := range c.fallbacks {
 		if _, ok := merged[k]; !ok {
@@ -549,6 +721,17 @@ func (c *PricingCatalog) Resolve(model string) ModelPricing {
 
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+
+	// A custom LiteLLM source may patch prices before the shared catalog does.
+	// The last item in customOrder has the highest configured priority.
+	for i := len(c.customOrder) - 1; i >= 0; i-- {
+		prices := c.custom[c.customOrder[i]]
+		for _, candidate := range modelLookupCandidates(model) {
+			if p, ok := prices[candidate]; ok && (p.HasTokenPrice() || p.OutputPricePerImage > 0) {
+				return p
+			}
+		}
+	}
 
 	for _, candidate := range modelLookupCandidates(model) {
 		if p, ok := c.defaults[candidate]; ok && (p.HasTokenPrice() || p.OutputPricePerImage > 0) {

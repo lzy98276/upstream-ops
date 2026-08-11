@@ -159,6 +159,8 @@ func TestSupportsIncrementalStream(t *testing.T) {
 		{KindOpenAIResponses, KindOpenAIChat},
 		{KindAnthropic, KindOpenAIResponses},
 		{KindOpenAIResponses, KindAnthropic},
+		{KindOpenAIChat, KindGemini},
+		{KindGemini, KindOpenAIChat},
 	}
 	for _, p := range pairs {
 		if !SupportsIncrementalStream(p[0], p[1], true) {

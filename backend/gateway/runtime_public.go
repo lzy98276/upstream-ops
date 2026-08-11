@@ -2,7 +2,6 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,10 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/lzy98276/upstream-ops/backend/connector"
 	"github.com/lzy98276/upstream-ops/backend/gateway/protocol"
 	"github.com/lzy98276/upstream-ops/backend/storage"
-	"github.com/gin-gonic/gin"
 )
 
 // HandleModels 返回 OpenAI 风格模型列表。
@@ -91,38 +90,16 @@ func (rt *Runtime) HandleModels(c *gin.Context) {
 			if err != nil {
 				continue
 			}
-			ch := target.Channel
-			if ch == nil {
-				label := ""
-				if target.Provider != nil {
-					label = target.Provider.Name
-				}
-				ch = &storage.Channel{
-					Name:    label,
-					SiteURL: target.BaseURL,
-				}
-			}
 			// 拉模型：组+路由 UA，空则默认 UA（与模型测试一致；转发仍透传客户端）
-			models, err := rt.fetchUpstreamModels(c.Request.Context(), ch, target.APIKey, rt.resolveAdminUserAgent(group, &route))
+			rt.applyRouteUserAgentForAdmin(target, group, &route)
+			models, err := rt.fetchRouteModels(c.Request.Context(), target, route.UpstreamProtocol)
 			if err != nil {
 				continue
 			}
-			routeMapping := ParseModelMapping(route.ModelMappingJSON)
 			for _, m := range models {
-				id := m
-				for src, dst := range routeMapping {
-					if dst == m && src != "*" {
-						id = src
-						break
-					}
+				for _, id := range mappedClientModelIDs(m, ParseModelMapping(route.ModelMappingJSON), groupMapping) {
+					add(id)
 				}
-				for src, dst := range groupMapping {
-					if dst == m && src != "*" {
-						id = src
-						break
-					}
-				}
-				add(id)
 			}
 		}
 		if mode == storage.GatewayModelsModeHybrid {
@@ -147,7 +124,7 @@ func (rt *Runtime) HandleModels(c *gin.Context) {
 func (rt *Runtime) fetchUpstreamModels(ctx context.Context, ch *storage.Channel, apiKey, userAgent string) ([]string, error) {
 	client := rt.httpClientForChannel(ch)
 	client.Timeout = 30 * time.Second
-	url := strings.TrimRight(ch.SiteURL, "/") + "/v1/models"
+	url := joinUpstreamURL(ch.SiteURL, "/v1/models")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build GET %s: %w", url, err)
@@ -212,10 +189,15 @@ func (rt *Runtime) HandleCountTokens(c *gin.Context) {
 		rt.writeGatewayError(c, protocolAnthropic, http.StatusBadRequest, "invalid_request_error", "system prompt injection failed: "+err.Error())
 		return
 	}
-	// 尝试转发到第一条可用路由的 /v1/messages/count_tokens
+	// 尝试转发到支持该模型的第一条可用路由。count_tokens 也是一次
+	// 模型请求，不能绕过严格模型路由后打到不具备该模型的上游。
 	routes, _ := rt.Routes.ListByGroupID(auth.Group.ID)
 	groupsByChannel := rt.loadGroupsByChannel(c.Request.Context(), routes)
-	cands := SortRoutes(routes, groupsByChannel, auth.Group.RateSortDirection, time.Now(), nil)
+	requestedModel := ExtractModelFromBody(body)
+	cands := ResolveRoutesForModel(
+		routes, groupsByChannel, auth.Group.RateSortDirection, time.Now(), nil,
+		requestedModel, ParseModelMapping(auth.Group.ModelMappingJSON), auth.Group.ModelRoutingEnabled,
+	)
 	for _, cand := range cands {
 		route := cand.Route
 		target, rerr := rt.resolveUpstreamTarget(&route)
@@ -223,9 +205,14 @@ func (rt *Runtime) HandleCountTokens(c *gin.Context) {
 			continue
 		}
 		rt.applyRouteUserAgent(target, auth.Group, &route)
+		upstreamModel := cand.UpstreamModel
+		forwardBody := body
+		if upstreamModel != "" && upstreamModel != requestedModel {
+			forwardBody = RewriteModelInBody(body, upstreamModel)
+		}
 		status, _, respBody, _, ferr := rt.forwardOnce(
 			c.Request.Context(), c, target, "/v1/messages/count_tokens",
-			http.MethodPost, c.Request.Header, body, false, protocol.KindAnthropic, 0,
+			http.MethodPost, c.Request.Header, forwardBody, false, protocol.KindAnthropic, 0,
 		)
 		if ferr == nil && status >= 200 && status < 300 && len(respBody) > 0 {
 			c.Data(status, "application/json", respBody)
@@ -286,6 +273,34 @@ func (rt *Runtime) HandleGeminiModels(c *gin.Context) {
 	// 调内部 HandleModels 逻辑太重，直接读组 models
 	group := auth.Group
 	list := rt.ParseModelsJSON(group.ModelsJSON)
+	if len(list) == 0 && rt.Routes != nil {
+		// Before the first explicit sync, still expose a native Gemini list by
+		// querying the configured routes. This path is display-only; request
+		// dispatch remains strict once a group has been synced.
+		routes, _ := rt.Routes.ListByGroupID(group.ID)
+		groupMapping := ParseModelMapping(group.ModelMappingJSON)
+		seen := map[string]struct{}{}
+		for _, route := range routes {
+			target, targetErr := rt.resolveUpstreamTarget(&route)
+			if targetErr != nil || !route.Enabled {
+				continue
+			}
+			rt.applyRouteUserAgentForAdmin(target, group, &route)
+			models, modelsErr := rt.fetchRouteModels(c.Request.Context(), target, route.UpstreamProtocol)
+			if modelsErr != nil {
+				continue
+			}
+			for _, upstream := range models {
+				for _, publicID := range mappedClientModelIDs(upstream, ParseModelMapping(route.ModelMappingJSON), groupMapping) {
+					if _, ok := seen[publicID]; ok {
+						continue
+					}
+					seen[publicID] = struct{}{}
+					list = append(list, ModelListItem{ID: publicID, Source: "sync"})
+				}
+			}
+		}
+	}
 	models := make([]gin.H, 0, len(list))
 	for _, m := range list {
 		name := "models/" + m.ID
@@ -295,97 +310,88 @@ func (rt *Runtime) HandleGeminiModels(c *gin.Context) {
 			"supportedGenerationMethods": []string{"generateContent", "countTokens"},
 		})
 	}
-	if len(models) == 0 {
-		// 回退：走上游 /v1/models 聚合
-		rt.HandleModels(c)
-		return
-	}
 	c.JSON(http.StatusOK, gin.H{"models": models})
 }
 
-// HandleGeminiGenerate POST /v1beta/models/*modelAction
-// 将 Gemini generateContent 粗转为 OpenAI chat 再转发，响应简化回传。
-
+// HandleGeminiGenerate keeps the native Gemini request shape all the way to
+// routing. It can therefore reach a native Gemini upstream directly or be
+// converted only when the selected route uses a different protocol.
 func (rt *Runtime) HandleGeminiGenerate(c *gin.Context) {
-	reqID := rt.ensureGatewayRequestID(c)
-	action := c.Param("modelAction") // e.g. /gemini-pro:generateContent
-	action = strings.TrimPrefix(action, "/")
-	// 解析 model:action
-	modelName := action
-	if i := strings.LastIndex(action, ":"); i >= 0 {
-		modelName = action[:i]
-	}
-	modelName = strings.TrimPrefix(modelName, "models/")
-
-	body, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":                     gin.H{"message": "bad body"},
-			jsonKeyUpstreamOpsRequestID: reqID,
-		})
+	action := strings.TrimPrefix(c.Param("modelAction"), "/")
+	action = strings.TrimPrefix(action, "models/")
+	if protocol.GeminiModelFromPath("/models/"+action) == "" || protocol.GeminiActionFromPath(action) == "" {
+		rt.writeGatewayError(c, protocol.KindGemini, http.StatusBadRequest, "invalid_request_error", "invalid Gemini model action")
 		return
 	}
-	// contents → messages 粗转
-	var gem map[string]any
-	_ = json.Unmarshal(body, &gem)
-	var messages []any
-	if instruction, ok := gem["systemInstruction"].(map[string]any); ok {
-		var text strings.Builder
-		if parts, ok := instruction["parts"].([]any); ok {
-			for _, part := range parts {
-				partMap, ok := part.(map[string]any)
-				if !ok {
-					continue
-				}
-				if value, ok := partMap["text"].(string); ok {
-					text.WriteString(value)
-				}
+	rt.HandleForward(c, "/v1beta/models/"+action, protocol.KindGemini)
+}
+
+// fetchRouteModels uses the route's actual protocol and authentication style.
+// Native Gemini returns {models:[{name:"models/..."}]}; other routes retain
+// the OpenAI-compatible /v1/models shape.
+func (rt *Runtime) fetchRouteModels(ctx context.Context, target *upstreamTarget, routeProtocol string) ([]string, error) {
+	if target == nil {
+		return nil, fmt.Errorf("upstream target is nil")
+	}
+	if strings.EqualFold(strings.TrimSpace(routeProtocol), storage.GatewayUpstreamProtocolAuto) && target.Provider != nil {
+		routeProtocol = target.Provider.UpstreamProtocol
+	}
+	upstreamKind := protocol.ResolveUpstream(routeProtocol, protocol.KindOpenAIChat, "")
+	path := "/v1/models"
+	if upstreamKind == protocol.KindGemini {
+		path = "/v1beta/models"
+	}
+	req, err := rt.buildUpstreamHTTPRequest(ctx, target, path, http.MethodGet, http.Header{}, nil, upstreamKind, false)
+	if err != nil {
+		return nil, fmt.Errorf("build GET %s: %w", path, err)
+	}
+	req.Header.Set("Accept", "application/json")
+	client := rt.httpClientForTarget(target.Channel, target.Provider)
+	client.Timeout = 30 * time.Second
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", req.URL.String(), err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: read body: %w", req.URL.String(), err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("GET %s: %w", req.URL.String(), connector.HTTPStatusError(resp.StatusCode, body))
+	}
+	var models []string
+	if upstreamKind == protocol.KindGemini {
+		var parsed struct {
+			Models []struct {
+				Name string `json:"name"`
+			} `json:"models"`
+		}
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			return nil, fmt.Errorf("GET %s: invalid Gemini models JSON: %w", req.URL.String(), err)
+		}
+		for _, item := range parsed.Models {
+			name := strings.TrimPrefix(strings.TrimSpace(item.Name), "models/")
+			if name != "" {
+				models = append(models, name)
 			}
 		}
-		if text.Len() > 0 {
-			messages = append(messages, map[string]any{"role": "system", "content": text.String()})
+	} else {
+		var parsed struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			return nil, fmt.Errorf("GET %s: invalid models JSON: %w", req.URL.String(), err)
+		}
+		for _, item := range parsed.Data {
+			if id := strings.TrimSpace(item.ID); id != "" {
+				models = append(models, id)
+			}
 		}
 	}
-	if contents, ok := gem["contents"].([]any); ok {
-		for _, raw := range contents {
-			cm, _ := raw.(map[string]any)
-			if cm == nil {
-				continue
-			}
-			role, _ := cm["role"].(string)
-			if role == "model" {
-				role = "assistant"
-			}
-			if role == "" {
-				role = "user"
-			}
-			text := ""
-			if parts, ok := cm["parts"].([]any); ok {
-				var b strings.Builder
-				for _, p := range parts {
-					if pm, ok := p.(map[string]any); ok {
-						if t, ok := pm["text"].(string); ok {
-							b.WriteString(t)
-						}
-					}
-				}
-				text = b.String()
-			}
-			messages = append(messages, map[string]any{"role": role, "content": text})
-		}
-	}
-	if len(messages) == 0 {
-		messages = []any{map[string]any{"role": "user", "content": string(body)}}
-	}
-	chatBody, _ := json.Marshal(map[string]any{
-		"model":    modelName,
-		"messages": messages,
-		"stream":   false,
-	})
-	// 伪造 body 走标准转发
-	c.Request.Body = io.NopCloser(bytes.NewReader(chatBody))
-	c.Request.ContentLength = int64(len(chatBody))
-	rt.HandleForward(c, "/v1/chat/completions", protocol.KindOpenAIChat)
+	return models, nil
 }
 
 // JSON / Header 中的网关请求 ID 字段（与使用记录 request_id 一致，便于排查）

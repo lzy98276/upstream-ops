@@ -18,6 +18,9 @@ func (rt *Runtime) Authenticate(c *gin.Context) (*AuthResult, error) {
 		raw = strings.TrimSpace(c.GetHeader("x-api-key"))
 	}
 	if raw == "" {
+		raw = strings.TrimSpace(c.Query("key"))
+	}
+	if raw == "" {
 		return nil, errors.New("missing api key")
 	}
 	key, err := rt.Keys.FindByHash(HashAPIKey(raw))

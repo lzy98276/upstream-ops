@@ -14,9 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/lzy98276/upstream-ops/backend/gateway/protocol"
 	"github.com/lzy98276/upstream-ops/backend/storage"
-	"github.com/gin-gonic/gin"
 )
 
 // buildUpstreamHTTPRequest 构建上游 HTTP 请求。
@@ -33,12 +33,11 @@ func (rt *Runtime) buildUpstreamHTTPRequest(
 	if target == nil {
 		return nil, errors.New("upstream target is nil")
 	}
-	base := strings.TrimRight(target.BaseURL, "/")
 	apiKey := target.APIKey
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	fullURL := base + path
+	fullURL := joinUpstreamURL(target.BaseURL, path)
 
 	upKind := protocol.NormalizeKind(kind)
 	if stream && (upKind == protocol.KindOpenAIChat || upKind == protocol.KindOpenAI) {
@@ -80,8 +79,17 @@ func (rt *Runtime) buildUpstreamHTTPRequest(
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	case storage.GatewayProviderAuthXAPIKey:
 		req.Header.Set("x-api-key", apiKey)
+	case storage.GatewayProviderAuthGoogle:
+		req.Header.Set("x-goog-api-key", apiKey)
 	default:
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+		if upKind == protocol.KindGemini {
+			// Native Gemini accepts x-goog-api-key. A provider that exposes a
+			// Gemini-compatible endpoint with Bearer auth can select that style
+			// explicitly instead of relying on the generic default.
+			req.Header.Set("x-goog-api-key", apiKey)
+		} else {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
 		if upKind == protocol.KindAnthropic {
 			req.Header.Set("x-api-key", apiKey)
 		}

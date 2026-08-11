@@ -11,6 +11,7 @@ const (
 	KindOpenAIChat      Kind = "openai_chat"      // /v1/chat/completions · messages
 	KindOpenAIResponses Kind = "openai_responses" // /v1/responses · input
 	KindAnthropic       Kind = "anthropic"        // /v1/messages
+	KindGemini          Kind = "gemini"           // /v1beta/models/:action
 	KindAuto            Kind = "auto"
 )
 
@@ -33,6 +34,8 @@ func NormalizeKind(k Kind) Kind {
 		return KindOpenAIResponses
 	case KindAnthropic:
 		return KindAnthropic
+	case KindGemini, "google", "google_gemini":
+		return KindGemini
 	case KindAuto, "":
 		return KindAuto
 	default:
@@ -54,6 +57,8 @@ func PathFor(kind Kind, inboundPath string) string {
 	switch NormalizeKind(kind) {
 	case KindAnthropic:
 		return "/v1/messages"
+	case KindGemini:
+		return "/v1beta/models"
 	case KindOpenAIResponses:
 		// 保留 /v1/responses/* 子路径
 		if strings.HasPrefix(ip, "/v1/responses") {
@@ -133,6 +138,8 @@ func ResolveUpstream(routeProtocol string, inbound Kind, model string) Kind {
 		return KindOpenAIResponses
 	case string(KindAnthropic):
 		return KindAnthropic
+	case string(KindGemini), "google", "google_gemini":
+		return KindGemini
 	}
 	// auto
 	if LooksLikeClaudeModel(model) {

@@ -17,6 +17,14 @@ type ScoredRoute struct {
 	BillingRate   float64
 }
 
+// ResolvedRoute is a schedulable route together with the model it will receive
+// after applying its route-level mapping and the group mapping.
+type ResolvedRoute struct {
+	ScoredRoute
+	UpstreamModel string
+	MappingChain  string
+}
+
 // RateForRoute 计算路由有效倍率（对齐同步账号 rateMultiplierForAccount）。
 //
 // 优先级：
@@ -147,5 +155,39 @@ func SortRoutes(routes []storage.GatewayRoute, groupsByChannel map[uint][]connec
 	sort.SliceStable(out, func(i, j int) bool {
 		return routeRateLess(out[i].Route, out[j].Route, out[i].EffectiveRate, out[j].EffectiveRate, desc)
 	})
+	return out
+}
+
+// ResolveRoutesForModel applies route-specific mappings before deciding
+// eligibility. Strict groups may only use routes with a synchronized model
+// capability list containing the mapped upstream model. Legacy groups retain
+// rate-only scheduling until their first successful model sync.
+func ResolveRoutesForModel(
+	routes []storage.GatewayRoute,
+	groupsByChannel map[uint][]connector.APIKeyGroup,
+	direction string,
+	now time.Time,
+	exclude map[uint]struct{},
+	requestedModel string,
+	groupMapping map[string]string,
+	strict bool,
+) []ResolvedRoute {
+	scored := SortRoutes(routes, groupsByChannel, direction, now, exclude)
+	out := make([]ResolvedRoute, 0, len(scored))
+	for _, candidate := range scored {
+		route := candidate.Route
+		upstreamModel, chain := ResolveModel(requestedModel, ParseModelMapping(route.ModelMappingJSON), groupMapping)
+		if upstreamModel == "" {
+			upstreamModel = strings.TrimSpace(requestedModel)
+		}
+		if strict && !routeSupportsModel(&route, upstreamModel) {
+			continue
+		}
+		out = append(out, ResolvedRoute{
+			ScoredRoute:   candidate,
+			UpstreamModel: upstreamModel,
+			MappingChain:  chain,
+		})
+	}
 	return out
 }

@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lzy98276/upstream-ops/backend/gateway/protocol"
-	"github.com/lzy98276/upstream-ops/backend/storage"
 	"github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
+	"github.com/lzy98276/upstream-ops/backend/gateway/protocol"
+	"github.com/lzy98276/upstream-ops/backend/storage"
 )
 
 // HandleResponsesWebSocket forwards native Responses WebSocket sessions. A
@@ -77,15 +77,19 @@ func (rt *Runtime) HandleResponsesWebSocket(c *gin.Context) {
 	}
 	groupsByChannel := rt.loadGroupsByChannel(c.Request.Context(), routes)
 	groupMapping := ParseModelMapping(group.ModelMappingJSON)
-	candidates := SortRoutes(routes, groupsByChannel, group.RateSortDirection, time.Now(), nil)
+	candidates := ResolveRoutesForModel(
+		routes, groupsByChannel, group.RateSortDirection, time.Now(), nil,
+		requestedModel, groupMapping, group.ModelRoutingEnabled,
+	)
+	if len(candidates) == 0 && group.ModelRoutingEnabled {
+		rt.writeWSResponsesFailed(ctx, client, "model_not_found", "no enabled upstream route supports model: "+requestedModel)
+		return
+	}
 
 	var selected *wsResponsesRoute
 	for _, cand := range candidates {
 		route := cand.Route
-		upstreamModel, chain := ResolveModel(requestedModel, ParseModelMapping(route.ModelMappingJSON), groupMapping)
-		if upstreamModel == "" {
-			upstreamModel = requestedModel
-		}
+		upstreamModel, chain := cand.UpstreamModel, cand.MappingChain
 		routeProto := rt.normalizeUpstreamProtocol(route.UpstreamProtocol)
 		target, resolveErr := rt.resolveUpstreamTarget(&route)
 		if resolveErr != nil {

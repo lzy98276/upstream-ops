@@ -115,6 +115,54 @@ func TestResolveModel(t *testing.T) {
 	}
 }
 
+func TestMappedClientModelIDs_ResolvesFullMappingChain(t *testing.T) {
+	ids := mappedClientModelIDs("upstream-model",
+		map[string]string{"client-model": "route-alias"},
+		map[string]string{"route-alias": "upstream-model"},
+	)
+	if len(ids) != 2 || ids[0] != "client-model" || ids[1] != "route-alias" {
+		t.Fatalf("mapped client IDs = %#v", ids)
+	}
+}
+
+func TestResolveRoutesForModel_StrictlyFiltersMappedCapabilities(t *testing.T) {
+	now := time.Now()
+	routes := []storage.GatewayRoute{
+		{
+			ID: 1, Position: 0, Weight: 10, Enabled: true,
+			RateConvertMode: "custom", RateConvertValue: 0.1, SourceAPIKeyCipher: "x",
+			SupportedModelsJSON: `["gpt-4o"]`,
+		},
+		{
+			ID: 2, Position: 1, Weight: 1, Enabled: true,
+			RateConvertMode: "custom", RateConvertValue: 0.2, SourceAPIKeyCipher: "x",
+			SupportedModelsJSON: `["gemini-2.5-pro"]`,
+		},
+		{
+			ID: 3, Position: 2, Weight: 99, Enabled: true,
+			RateConvertMode: "custom", RateConvertValue: 0.05, SourceAPIKeyCipher: "x",
+			SupportedModelsJSON: `[]`,
+		},
+	}
+
+	got := ResolveRoutesForModel(routes, nil, "asc", now, nil, "client-gemini", map[string]string{
+		"client-gemini": "gemini-2.5-pro",
+	}, true)
+	if len(got) != 1 {
+		t.Fatalf("candidate count = %d, want 1", len(got))
+	}
+	if got[0].Route.ID != 2 || got[0].UpstreamModel != "gemini-2.5-pro" {
+		t.Fatalf("candidate = %+v", got[0])
+	}
+
+	got = ResolveRoutesForModel(routes, nil, "asc", now, map[uint]struct{}{2: {}}, "client-gemini", map[string]string{
+		"client-gemini": "gemini-2.5-pro",
+	}, true)
+	if len(got) != 0 {
+		t.Fatalf("failover candidates = %+v, want none", got)
+	}
+}
+
 func TestCalculateCost(t *testing.T) {
 	p := ModelPricing{InputPricePerToken: 0.001, OutputPricePerToken: 0.002}
 	// 原值倍率 0.06：actual = base × 0.06（只乘一次账号计费倍率）

@@ -12,7 +12,12 @@ func SupportsIncrementalStream(inbound, upstream Kind, converted bool) bool {
 		return true
 	}
 	in, up := NormalizeKind(inbound), NormalizeKind(upstream)
-	// 任意 OpenAI Chat / Responses / Anthropic 互转均可增量
+	// OpenAI Chat / Responses / Anthropic 互转均可增量。Gemini 当前只有
+	// 与 OpenAI Chat 的事件级转换器，其他 Gemini 交叉协议仍走缓冲转换。
+	if (in == KindGemini && (up == KindOpenAIChat || up == KindOpenAI)) ||
+		(up == KindGemini && (in == KindOpenAIChat || in == KindOpenAI)) {
+		return true
+	}
 	okIn := in == KindOpenAIChat || in == KindOpenAI || in == KindOpenAIResponses || in == KindAnthropic
 	okUp := up == KindOpenAIChat || up == KindOpenAI || up == KindOpenAIResponses || up == KindAnthropic
 	return okIn && okUp
@@ -218,9 +223,9 @@ type OpenAIToAnthropicStream struct {
 	done    bool
 
 	// 当前内容块
-	textOpen      bool
-	textIndex     int
-	nextBlockIdx  int
+	textOpen     bool
+	textIndex    int
+	nextBlockIdx int
 	// chat tool index → anthropic content block index
 	toolBlockIdx map[int]int
 	toolOpened   map[int]bool
@@ -403,8 +408,8 @@ func (s *OpenAIToAnthropicStream) Close() [][]byte {
 	// 若全程无内容，补一个空 text block（Anthropic 要求 content 非空列表更稳）
 	if s.nextBlockIdx == 0 {
 		out = append(out, encodeSSEFrame("content_block_start", map[string]any{
-			"type":  "content_block_start",
-			"index": 0,
+			"type":          "content_block_start",
+			"index":         0,
 			"content_block": map[string]any{"type": "text", "text": ""},
 		}))
 		out = append(out, encodeSSEFrame("content_block_stop", map[string]any{

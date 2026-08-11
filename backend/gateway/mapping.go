@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
 )
 
@@ -96,6 +97,38 @@ func RewriteModelInBody(body []byte, upstreamModel string) []byte {
 		return body
 	}
 	return out
+}
+
+func mappedClientModelIDs(upstream string, maps ...map[string]string) []string {
+	upstream = strings.TrimSpace(upstream)
+	if upstream == "" {
+		return nil
+	}
+	// A client-facing name may require more than one mapping pass, for example
+	// client -> route alias -> upstream model. Resolve every explicit mapping
+	// key through the same ordered mapping chain used during forwarding.
+	candidates := map[string]struct{}{}
+	for _, mapping := range maps {
+		for client := range mapping {
+			client = strings.TrimSpace(client)
+			if client == "" || client == "*" {
+				continue
+			}
+			candidates[client] = struct{}{}
+		}
+	}
+	ids := make([]string, 0, len(candidates))
+	for client := range candidates {
+		resolved, _ := ResolveModel(client, maps...)
+		if resolved == upstream {
+			ids = append(ids, client)
+		}
+	}
+	if len(ids) == 0 {
+		return []string{upstream}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // ExtractModelFromBody 从 JSON 请求体取 model。

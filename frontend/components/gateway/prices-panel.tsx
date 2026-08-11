@@ -1,4 +1,6 @@
-import { Pencil, Plus, Trash2 } from "lucide-react"
+import { useCallback, useEffect, useState } from "react"
+import { Loader2, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react"
+import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -28,7 +30,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import type { ModelPriceOverride } from "@/lib/api-types"
+import { apiFetch } from "@/lib/api"
+import type { ModelPriceOverride, ModelPriceSource } from "@/lib/api-types"
 import {
   parsePriceTiers,
   perTokenToMTok,
@@ -50,6 +53,20 @@ type PricesPanelProps = {
   onEditPrice: (p: ModelPriceOverride) => void
   onDeletePrice: (p: ModelPriceOverride) => void
 }
+
+type PriceSourceForm = {
+  name: string
+  url: string
+  priority: string
+  enabled: boolean
+}
+
+const emptyPriceSourceForm = (): PriceSourceForm => ({
+  name: "",
+  url: "",
+  priority: "100",
+  enabled: true,
+})
 
 function PriceSummary({ price }: { price: ModelPriceOverride }) {
   switch (price.billing_mode || "token") {
@@ -176,9 +193,212 @@ export function PricesPanel({
   onDeletePrice,
 }: PricesPanelProps) {
   const billingMode = priceForm.billing_mode
+  const [sources, setSources] = useState<ModelPriceSource[]>([])
+  const [sourcesLoading, setSourcesLoading] = useState(false)
+  const [sourceBusy, setSourceBusy] = useState(false)
+  const [sourceDialogOpen, setSourceDialogOpen] = useState(false)
+  const [editingSource, setEditingSource] = useState<ModelPriceSource | null>(null)
+  const [sourceForm, setSourceForm] = useState<PriceSourceForm>(emptyPriceSourceForm)
+
+  const loadSources = useCallback(async () => {
+    setSourcesLoading(true)
+    try {
+      const res = await apiFetch<{ items: ModelPriceSource[] }>("/gateway/price-sources")
+      setSources(res.items ?? [])
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "加载价格源失败")
+    } finally {
+      setSourcesLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadSources()
+  }, [loadSources])
+
+  function openCreateSource() {
+    setEditingSource(null)
+    setSourceForm(emptyPriceSourceForm())
+    setSourceDialogOpen(true)
+  }
+
+  function openEditSource(source: ModelPriceSource) {
+    setEditingSource(source)
+    setSourceForm({
+      name: source.name,
+      url: source.url,
+      priority: String(source.priority),
+      enabled: source.enabled,
+    })
+    setSourceDialogOpen(true)
+  }
+
+  async function saveSource() {
+    const name = sourceForm.name.trim()
+    const url = sourceForm.url.trim()
+    const priority = Number(sourceForm.priority)
+    if (!name || !url) {
+      toast.error("请填写价格源名称和 URL")
+      return
+    }
+    if (!Number.isInteger(priority)) {
+      toast.error("优先级必须是整数")
+      return
+    }
+    setSourceBusy(true)
+    try {
+      const body = JSON.stringify({ name, url, priority, enabled: sourceForm.enabled })
+      if (editingSource) {
+        await apiFetch(`/gateway/price-sources/${editingSource.id}`, { method: "PUT", body })
+        toast.success("已更新价格源")
+      } else {
+        await apiFetch("/gateway/price-sources", { method: "POST", body })
+        toast.success("已创建价格源")
+      }
+      setSourceDialogOpen(false)
+      await loadSources()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "保存价格源失败")
+    } finally {
+      setSourceBusy(false)
+    }
+  }
+
+  async function syncSource(source: ModelPriceSource) {
+    setSourceBusy(true)
+    try {
+      await apiFetch(`/gateway/price-sources/${source.id}/sync`, { method: "POST" })
+      toast.success("价格源已同步")
+      await loadSources()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "同步价格源失败")
+      await loadSources()
+    } finally {
+      setSourceBusy(false)
+    }
+  }
+
+  async function deleteSource(source: ModelPriceSource) {
+    setSourceBusy(true)
+    try {
+      await apiFetch(`/gateway/price-sources/${source.id}`, { method: "DELETE" })
+      toast.success("已删除价格源")
+      await loadSources()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "删除价格源失败")
+    } finally {
+      setSourceBusy(false)
+    }
+  }
 
   return (
     <div className="space-y-4">
+      <Card className="overflow-hidden border-border shadow-none">
+        <CardContent className="space-y-4 p-4 sm:p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-sm leading-6 text-muted-foreground">
+              官方默认目录来自 LiteLLM。自定义源使用相同 JSON 格式，优先级更高的源覆盖较低优先级。
+            </p>
+            <div className="flex shrink-0 gap-2">
+              <Button
+                size="icon"
+                variant="outline"
+                title="刷新价格源"
+                onClick={() => void loadSources()}
+                disabled={sourcesLoading || sourceBusy}
+              >
+                <RefreshCw className={sourcesLoading ? "size-4 animate-spin" : "size-4"} />
+                <span className="sr-only">刷新价格源</span>
+              </Button>
+              <Button onClick={openCreateSource} disabled={sourceBusy}>
+                <Plus className="size-4" /> 新建价格源
+              </Button>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto rounded-md border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>名称</TableHead>
+                  <TableHead>地址</TableHead>
+                  <TableHead>优先级</TableHead>
+                  <TableHead>同步状态</TableHead>
+                  <TableHead className="w-[132px] text-right">操作</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {sources.map((source) => (
+                  <TableRow key={source.id}>
+                    <TableCell className="font-medium">{source.name}</TableCell>
+                    <TableCell className="max-w-80 truncate font-mono text-xs" title={source.url}>
+                      {source.url}
+                    </TableCell>
+                    <TableCell className="tabular-nums">{source.priority}</TableCell>
+                    <TableCell>
+                      <div className="space-y-1">
+                        <Badge variant={source.enabled ? "default" : "secondary"}>
+                          {source.enabled ? `${source.model_count} 个模型` : "禁用"}
+                        </Badge>
+                        {source.last_error ? (
+                          <p className="max-w-64 truncate text-xs text-destructive" title={source.last_error}>
+                            {source.last_error}
+                          </p>
+                        ) : null}
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex justify-end gap-1">
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="size-8"
+                          title="同步价格源"
+                          onClick={() => void syncSource(source)}
+                          disabled={sourceBusy || !source.enabled}
+                        >
+                          {sourceBusy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+                          <span className="sr-only">同步价格源</span>
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="size-8"
+                          title="编辑价格源"
+                          onClick={() => openEditSource(source)}
+                          disabled={sourceBusy}
+                        >
+                          <Pencil className="size-4" />
+                          <span className="sr-only">编辑价格源</span>
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="size-8 text-destructive hover:text-destructive"
+                          title="删除价格源"
+                          onClick={() => void deleteSource(source)}
+                          disabled={sourceBusy}
+                        >
+                          <Trash2 className="size-4" />
+                          <span className="sr-only">删除价格源</span>
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+                {sources.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={5} className="h-20 text-center text-muted-foreground">
+                      未添加自定义价格源，当前只使用 LiteLLM 官方目录。
+                    </TableCell>
+                  </TableRow>
+                ) : null}
+              </TableBody>
+            </Table>
+          </div>
+        </CardContent>
+      </Card>
+
       <Card className="overflow-hidden border-border shadow-none">
         <CardContent className="space-y-4 p-4 sm:p-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -476,6 +696,62 @@ export function PricesPanel({
             </Button>
             <Button onClick={onSavePrice} disabled={busy}>
               保存价格覆盖
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={sourceDialogOpen} onOpenChange={setSourceDialogOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{editingSource ? "编辑价格源" : "新建价格源"}</DialogTitle>
+            <DialogDescription>
+              URL 必须返回 LiteLLM `model_prices_and_context_window.json` 格式的 JSON。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label>名称</Label>
+              <Input
+                value={sourceForm.name}
+                onChange={(e) => setSourceForm({ ...sourceForm, name: e.target.value })}
+                placeholder="例如 internal-prices"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>JSON URL</Label>
+              <Input
+                value={sourceForm.url}
+                onChange={(e) => setSourceForm({ ...sourceForm, url: e.target.value })}
+                placeholder="https://example.com/model_prices_and_context_window.json"
+              />
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label>优先级</Label>
+                <Input
+                  type="number"
+                  step="1"
+                  value={sourceForm.priority}
+                  onChange={(e) => setSourceForm({ ...sourceForm, priority: e.target.value })}
+                />
+              </div>
+              <div className="flex items-end gap-2 pb-2">
+                <Switch
+                  checked={sourceForm.enabled}
+                  onCheckedChange={(enabled) => setSourceForm({ ...sourceForm, enabled })}
+                />
+                <Label>启用</Label>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSourceDialogOpen(false)} disabled={sourceBusy}>
+              取消
+            </Button>
+            <Button onClick={() => void saveSource()} disabled={sourceBusy}>
+              {sourceBusy ? <Loader2 className="size-4 animate-spin" /> : null}
+              保存价格源
             </Button>
           </DialogFooter>
         </DialogContent>

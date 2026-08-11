@@ -16,7 +16,8 @@ func (svc *Service) normalizeUpstreamProtocol(v string) string {
 		return storage.GatewayUpstreamProtocolOpenAIChat
 	case storage.GatewayUpstreamProtocolOpenAIChat,
 		storage.GatewayUpstreamProtocolOpenAIResponses,
-		storage.GatewayUpstreamProtocolAnthropic:
+		storage.GatewayUpstreamProtocolAnthropic,
+		storage.GatewayUpstreamProtocolGemini:
 		return up
 	case "responses":
 		return storage.GatewayUpstreamProtocolOpenAIResponses
@@ -32,7 +33,7 @@ func (svc *Service) normalizeProviderProtocol(v string) string {
 func (svc *Service) normalizeProviderAuthStyle(v string) string {
 	s := strings.ToLower(strings.TrimSpace(v))
 	switch s {
-	case storage.GatewayProviderAuthBearer, storage.GatewayProviderAuthXAPIKey:
+	case storage.GatewayProviderAuthBearer, storage.GatewayProviderAuthXAPIKey, storage.GatewayProviderAuthGoogle:
 		return s
 	default:
 		return storage.GatewayProviderAuthBoth

@@ -556,6 +556,9 @@ export function RoutesPanel({
                       <SelectItem value="anthropic" description="/v1/messages">
                         Anthropic
                       </SelectItem>
+					  <SelectItem value="gemini" description="/v1beta/models/:action">
+						Google Gemini
+					  </SelectItem>
                       <SelectItem value="openai" description="兼容，等同 Chat">
                         openai
                       </SelectItem>

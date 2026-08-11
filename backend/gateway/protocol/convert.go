@@ -11,6 +11,40 @@ func ConvertRequest(inbound, upstream Kind, body []byte, model string, stream bo
 	out = body
 
 	switch {
+	case IsOpenAIFamily(in) && in != KindOpenAIResponses && up == KindGemini:
+		out, err = OpenAIToGeminiRequest(out, model, stream)
+		converted = true
+	case in == KindGemini && (up == KindOpenAIChat || up == KindOpenAI):
+		out, err = GeminiToOpenAIRequest(out, model, stream)
+		converted = true
+	case in == KindAnthropic && up == KindGemini:
+		chat, e2 := AnthropicToOpenAIRequest(out, model, stream)
+		if e2 != nil {
+			return nil, false, e2
+		}
+		out, err = OpenAIToGeminiRequest(chat, model, stream)
+		converted = true
+	case in == KindOpenAIResponses && up == KindGemini:
+		chat, e2 := ResponsesToOpenAIChatRequest(out, model, stream)
+		if e2 != nil {
+			return nil, false, e2
+		}
+		out, err = OpenAIToGeminiRequest(chat, model, stream)
+		converted = true
+	case in == KindGemini && up == KindAnthropic:
+		chat, e2 := GeminiToOpenAIRequest(out, model, stream)
+		if e2 != nil {
+			return nil, false, e2
+		}
+		out, err = OpenAIToAnthropicRequest(chat, model, stream)
+		converted = true
+	case in == KindGemini && up == KindOpenAIResponses:
+		chat, e2 := GeminiToOpenAIRequest(out, model, stream)
+		if e2 != nil {
+			return nil, false, e2
+		}
+		out, err = OpenAIChatToResponsesRequest(chat, model, stream)
+		converted = true
 	case IsOpenAIFamily(in) && in != KindOpenAIResponses && up == KindAnthropic:
 		out, err = OpenAIToAnthropicRequest(out, model, stream)
 		converted = true
@@ -56,6 +90,34 @@ func ConvertResponse(inbound, upstream Kind, body []byte, model string) []byte {
 	var out []byte
 	var err error
 	switch {
+	case IsOpenAIFamily(in) && in != KindOpenAIResponses && up == KindGemini:
+		out, err = GeminiToOpenAIResponse(body, model)
+	case in == KindOpenAIResponses && up == KindGemini:
+		chat, e2 := GeminiToOpenAIResponse(body, model)
+		if e2 != nil {
+			return body
+		}
+		out, err = OpenAIChatToResponsesResponse(chat, model)
+	case in == KindAnthropic && up == KindGemini:
+		chat, e2 := GeminiToOpenAIResponse(body, model)
+		if e2 != nil {
+			return body
+		}
+		out, err = OpenAIToAnthropicResponse(chat, model)
+	case in == KindGemini && (up == KindOpenAIChat || up == KindOpenAI):
+		out, err = OpenAIToGeminiResponse(body, model)
+	case in == KindGemini && up == KindAnthropic:
+		chat, e2 := AnthropicToOpenAIResponse(body, model)
+		if e2 != nil {
+			return body
+		}
+		out, err = OpenAIToGeminiResponse(chat, model)
+	case in == KindGemini && up == KindOpenAIResponses:
+		chat, e2 := ResponsesToOpenAIChatResponse(body, model)
+		if e2 != nil {
+			return body
+		}
+		out, err = OpenAIToGeminiResponse(chat, model)
 	case IsOpenAIFamily(in) && in != KindOpenAIResponses && up == KindAnthropic:
 		out, err = AnthropicToOpenAIResponse(body, model)
 	case in == KindAnthropic && IsOpenAIFamily(up) && up != KindOpenAIResponses:
@@ -104,6 +166,10 @@ func ConvertStreamResponse(
 	}
 
 	switch {
+	case IsOpenAIFamily(in) && in != KindOpenAIResponses && up == KindGemini:
+		return GeminiSSEToOpenAISSE(body, model)
+	case in == KindGemini && (up == KindOpenAIChat || up == KindOpenAI):
+		return OpenAISSEToGeminiSSE(body, model)
 	case IsOpenAIFamily(in) && in != KindOpenAIResponses && up == KindAnthropic:
 		return AnthropicSSEToOpenAISSE(body, model)
 	case in == KindAnthropic && IsOpenAIFamily(up) && up != KindOpenAIResponses:

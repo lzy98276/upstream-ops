@@ -10,6 +10,43 @@ import (
 	"github.com/lzy98276/upstream-ops/backend/storage"
 )
 
+func routeModelsJSONString(models []string) string {
+	seen := make(map[string]struct{}, len(models))
+	out := make([]string, 0, len(models))
+	for _, raw := range models {
+		model := strings.TrimSpace(raw)
+		if model == "" {
+			continue
+		}
+		if _, ok := seen[model]; ok {
+			continue
+		}
+		seen[model] = struct{}{}
+		out = append(out, model)
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return "[]"
+	}
+	return string(encoded)
+}
+
+func routeSupportsModel(route *storage.GatewayRoute, model string) bool {
+	if route == nil || strings.TrimSpace(model) == "" {
+		return false
+	}
+	var models []string
+	if err := json.Unmarshal([]byte(route.SupportedModelsJSON), &models); err != nil {
+		return false
+	}
+	for _, candidate := range models {
+		if strings.TrimSpace(candidate) == strings.TrimSpace(model) {
+			return true
+		}
+	}
+	return false
+}
+
 // ParseModelsJSON 解析组 models_json 为清单项。
 func (svc *Service) ParseModelsJSON(raw string) []ModelListItem {
 	raw = strings.TrimSpace(raw)

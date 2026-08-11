@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/lzy98276/upstream-ops/backend/gateway/protocol"
 	"github.com/lzy98276/upstream-ops/backend/storage"
-	"github.com/gin-gonic/gin"
 )
 
 // HandleForward 主转发（含故障转移）。
@@ -43,12 +43,18 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 	}
 
 	requestedModel := ExtractModelFromBody(body)
+	if protocol.NormalizeKind(kind) == protocol.KindGemini {
+		requestedModel = protocol.GeminiModelFromPath(path)
+	}
 	body, err = rt.applyServiceTierRules(group, key, kind, requestedModel, body)
 	if err != nil {
 		rt.writeGatewayError(c, kind, http.StatusForbidden, "permission_error", err.Error())
 		return
 	}
 	stream := ExtractStreamFlag(body)
+	if protocol.NormalizeKind(kind) == protocol.KindGemini {
+		stream = protocol.GeminiStreamAction(path)
+	}
 	billingInput := billingInputFromRequest(path, body)
 	serviceTier, reasoningEffort := ExtractMetaFromBody(body)
 	// thinking 是否开启：国产模型无 effort 档位时，按上游映射模型补默认 high（对齐 sub2api）
@@ -102,10 +108,17 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 	// 全局尝试序号（写入 usage.attempt，同一 request_id 关联）
 	attemptNo := 0
 	routesTried := 0
+	modelRoutingMiss := false
 
 	for {
-		candidates := SortRoutes(routes, groupsByChannel, group.RateSortDirection, time.Now(), exclude)
+		candidates := ResolveRoutesForModel(
+			routes, groupsByChannel, group.RateSortDirection, time.Now(), exclude,
+			requestedModel, groupMapping, group.ModelRoutingEnabled,
+		)
 		if len(candidates) == 0 {
+			if routesTried == 0 && group.ModelRoutingEnabled {
+				modelRoutingMiss = true
+			}
 			break
 		}
 		// 非首条路由 = 顺延；超过顺延次数则停止
@@ -123,11 +136,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		}
 		routesTried++
 
-		routeMapping := ParseModelMapping(route.ModelMappingJSON)
-		upstreamModel, chain := ResolveModel(requestedModel, routeMapping, groupMapping)
-		if upstreamModel == "" {
-			upstreamModel = requestedModel
-		}
+		upstreamModel, chain := cand.UpstreamModel, cand.MappingChain
 		// 映射后的上游模型可能是 kimi/glm 等；thinking 开了但无档位时补 high
 		attemptReasoningEffort := ApplyThinkingEnabledEffortFallback(
 			reasoningEffort, thinkingEnabled, upstreamModel, requestedModel,
@@ -135,7 +144,10 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 
 		// 当前路由已进 exclude：失败后是否还有可顺延的其它路由。
 		// 没有下家时关闭首字超时，最后一枪老实等上游，而不是再掐 30s 直接 502。
-		remainingAfter := SortRoutes(routes, groupsByChannel, group.RateSortDirection, time.Now(), exclude)
+		remainingAfter := ResolveRoutesForModel(
+			routes, groupsByChannel, group.RateSortDirection, time.Now(), exclude,
+			requestedModel, groupMapping, group.ModelRoutingEnabled,
+		)
 		attemptFTTimeout := rt.effectiveFirstTokenTimeout(
 			firstTokenTimeout,
 			retryEnabled, failoverEnabled,
@@ -199,7 +211,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				return
 			}
 
-			upstreamFullURL := target.BaseURL + upstreamPath
+			upstreamFullURL := joinUpstreamURL(target.BaseURL, upstreamPath)
 			usageMeta := usageRecordMeta{
 				InboundEndpoint:   path,
 				UpstreamEndpoint:  upstreamPath,
@@ -445,6 +457,10 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 	}
 
 finishError:
+	if modelRoutingMiss {
+		rt.writeGatewayError(c, kind, http.StatusNotFound, "model_not_found", "no enabled upstream route supports model: "+requestedModel)
+		return
+	}
 	if lastStatus > 0 && len(lastBody) > 0 {
 		out := rt.injectUpstreamOpsRequestID(lastBody, reqID)
 		rt.setGatewayRequestIDHeaders(c, reqID)

@@ -41,6 +41,7 @@ import type {
 import { cn } from "@/lib/utils"
 
 type ProviderForm = {
+  preset: "custom" | "gemini" | "grok"
   name: string
   base_url: string
   api_key: string
@@ -53,6 +54,7 @@ type ProviderForm = {
 }
 
 const emptyForm = (): ProviderForm => ({
+  preset: "custom",
   name: "",
   base_url: "",
   api_key: "",
@@ -107,9 +109,36 @@ export function GatewayProvidersPanel() {
     setDialogOpen(true)
   }
 
+  function applyPreset(preset: ProviderForm["preset"]) {
+    if (preset === "gemini") {
+      setForm({
+        ...form,
+        preset,
+        name: form.name || "Google Gemini",
+        base_url: "https://generativelanguage.googleapis.com",
+        upstream_protocol: "gemini",
+        auth_style: "google-api-key",
+      })
+      return
+    }
+    if (preset === "grok") {
+      setForm({
+        ...form,
+        preset,
+        name: form.name || "xAI Grok",
+		base_url: "https://api.x.ai/v1",
+        upstream_protocol: "openai_chat",
+        auth_style: "bearer",
+      })
+      return
+    }
+    setForm({ ...form, preset })
+  }
+
   function openEdit(item: GatewayProvider) {
     setEditing(item)
     setForm({
+      preset: "custom",
       name: item.name,
       base_url: item.base_url,
       api_key: "",
@@ -298,6 +327,8 @@ export function GatewayProvidersPanel() {
                       <TableCell className="text-sm">
                         {p.upstream_protocol === "openai_responses"
                           ? "Responses"
+                          : p.upstream_protocol === "gemini"
+                            ? "Gemini"
                           : p.upstream_protocol === "openai_chat" ||
                               p.upstream_protocol === "openai"
                             ? "Chat"
@@ -393,6 +424,20 @@ export function GatewayProvidersPanel() {
           </DialogHeader>
           <div className="space-y-3">
             <div className="space-y-1">
+              <Label>渠道预设</Label>
+              <Select
+                value={form.preset}
+                onValueChange={(v) => applyPreset(v as ProviderForm["preset"])}
+              >
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="custom">自定义</SelectItem>
+                  <SelectItem value="gemini">Google Gemini</SelectItem>
+                  <SelectItem value="grok">xAI Grok</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
               <Label>名称</Label>
               <Input
                 value={form.name}
@@ -458,6 +503,9 @@ export function GatewayProvidersPanel() {
                     <SelectItem value="anthropic" description="/v1/messages">
                       Anthropic
                     </SelectItem>
+                    <SelectItem value="gemini" description="/v1beta/models/:action">
+                      Google Gemini
+                    </SelectItem>
                     <SelectItem value="openai" description="兼容，等同 Chat">
                       openai
                     </SelectItem>
@@ -491,6 +539,7 @@ export function GatewayProvidersPanel() {
                     <SelectItem value="both">Bearer 与 x-api-key</SelectItem>
                     <SelectItem value="bearer">仅 Bearer</SelectItem>
                     <SelectItem value="x-api-key">仅 x-api-key</SelectItem>
+                    <SelectItem value="google-api-key">Google API key</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

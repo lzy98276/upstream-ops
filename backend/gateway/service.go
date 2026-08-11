@@ -39,17 +39,18 @@ type ChannelAPI interface {
 // Service 网关领域服务组装根。
 // 管理面操作见 Admin；数据面转发见 Runtime；公开方法多为委托以保持调用方兼容。
 type Service struct {
-	Groups     *storage.GatewayGroups
-	Keys       *storage.GatewayKeys
-	Routes     *storage.GatewayRoutes
-	Providers  *storage.GatewayProviders
-	Usage      *storage.GatewayUsageLogs
-	Prices     *storage.ModelPriceOverrides
-	Channels   *storage.Channels
-	ChannelAPI ChannelAPI
-	Cipher     *crypto.Cipher
-	Pricing    *PricingCatalog
-	Log        *slog.Logger
+	Groups       *storage.GatewayGroups
+	Keys         *storage.GatewayKeys
+	Routes       *storage.GatewayRoutes
+	Providers    *storage.GatewayProviders
+	Usage        *storage.GatewayUsageLogs
+	Prices       *storage.ModelPriceOverrides
+	PriceSources *storage.ModelPriceSources
+	Channels     *storage.Channels
+	ChannelAPI   ChannelAPI
+	Cipher       *crypto.Cipher
+	Pricing      *PricingCatalog
+	Log          *slog.Logger
 
 	// Admin 管理面；嵌入 *Service 共享依赖。
 	Admin *AdminService
@@ -114,6 +115,36 @@ func NewService(
 // SetProviders 注入直连渠道仓储（main 组装时调用，保持 NewService 签名兼容）。
 func (s *Service) SetProviders(p *storage.GatewayProviders) {
 	s.Providers = p
+}
+
+// SetPriceSources attaches the managed LiteLLM pricing-source repository.
+// It is injected after construction to preserve the public constructor used
+// by integrations and existing tests.
+func (s *Service) SetPriceSources(sources *storage.ModelPriceSources) {
+	s.PriceSources = sources
+	if s.Pricing != nil {
+		s.Pricing.sources = sources
+	}
+}
+
+// SyncPriceSource immediately refreshes an enabled custom LiteLLM source.
+func (s *Service) SyncPriceSource(id uint) error {
+	if s == nil || s.Pricing == nil {
+		return nil
+	}
+	return s.Pricing.SyncManagedSource(id)
+}
+
+func (s *Service) DropPriceSource(id uint) {
+	if s != nil && s.Pricing != nil {
+		s.Pricing.DropManagedSource(id)
+	}
+}
+
+func (s *Service) RefreshPriceSourceOrder() {
+	if s != nil && s.Pricing != nil {
+		s.Pricing.RefreshManagedSourceOrder()
+	}
 }
 
 // ListDefaultPrices 返回内置模型价目（管理端只读）。

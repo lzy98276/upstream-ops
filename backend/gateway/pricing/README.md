@@ -4,9 +4,10 @@
 
 ## 来源
 
-- 运行时主表：`pricing.remoteURL`，默认
-  `https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.json`
-- 本地缓存：`pricing.dataDir/model_prices_and_context_window.json`
+- 运行时主表：LiteLLM `model_prices_and_context_window.json`，默认
+  `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json`
+- 本地缓存：`pricing.dataDir/litellm_model_prices_and_context_window.json`
+- 管理端自定义源：`/gateway/price-sources`，必须返回 LiteLLM 同格式；优先级更高的源覆盖默认目录
 - 内置回退：本目录 `default_prices.json`
 - 硬编码回退：`pricing.go` 中 `seedFallbackPrices` / `fallbackForModel`，对齐
   `tmp/sub2api/backend/internal/service/billing_service.go`（如 `grok-4.5` 不在 LiteLLM 表中）
@@ -14,8 +15,9 @@
 ## 解析顺序
 
 1. DB 价格覆盖（`model_price_overrides`）
-2. 本目录 JSON 精确/模糊匹配
-3. 硬编码家族回退（Grok 等）
+2. 管理端自定义 LiteLLM 源（按优先级）
+3. LiteLLM 官方目录与离线回退 JSON
+4. 硬编码家族回退（Grok 等）
 
 ## DeepSeek
 
@@ -25,8 +27,8 @@
 
 ## 更新
 
-服务启动时读取本地缓存并校验远程哈希；之后每 `pricing.hashCheckIntervalMinutes`
-分钟检查一次，哈希变化即下载、写缓存并热更新内存价目，无需重启。
+服务启动时读取本地缓存；之后每 `pricing.hashCheckIntervalMinutes`
+分钟按间隔检查 LiteLLM 和自定义源，下载成功后热更新内存价目，无需重启。
 远程同步关闭或失败时继续使用缓存和内置表。
 
 可在配置文件中调整：
@@ -34,8 +36,9 @@
 ```yaml
 pricing:
   enabled: true
-  remoteURL: https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.json
-  hashURL: https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.sha256
+  remoteURL: https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
+  # LiteLLM 没有配套 hash 文件，留空即可
+  hashURL: ""
   dataDir: ./data
   hashCheckIntervalMinutes: 10
 ```
@@ -43,10 +46,7 @@ pricing:
 手工更新内置回退表时：
 
 ```bash
-# 从参考项目同步（精选子集，DeepSeek 较少）
-cp tmp/sub2api/backend/resources/model-pricing/model_prices_and_context_window.json \
-  backend/gateway/pricing/default_prices.json
-
-# 再从 LiteLLM 主表补全 litellm_provider=deepseek 条目与常见别名
-# （见仓库内补价脚本或手工合并 /tmp litellm json）
+# 从 LiteLLM 主表同步（仅用于更新内置离线回退）
+curl -L https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json \
+  -o backend/gateway/pricing/default_prices.json
 ```
