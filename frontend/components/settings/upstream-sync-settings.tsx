@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
   Check,
   CheckCircle2,
   ChevronsUpDown,
+  ChevronDown,
+  ChevronUp,
   HelpCircle,
   ListTree,
   MoreHorizontal,
@@ -77,6 +79,7 @@ import { cn } from "@/lib/utils";
 import type {
   GatewayGroup,
   GatewayRoute,
+  NewAPIAutoGroups,
   RateSnapshot,
   UpstreamSyncLog,
   UpstreamSyncLogPage,
@@ -95,6 +98,8 @@ interface TargetForm {
   admin_api_key: string;
   enabled: boolean;
 }
+
+type NewAPITargetForm = TargetForm;
 
 interface SyncGroupForm {
   id?: number;
@@ -142,6 +147,10 @@ const emptyTargetForm: TargetForm = {
   base_url: "",
   admin_api_key: "",
   enabled: true,
+};
+
+const emptyNewAPITargetForm: NewAPITargetForm = {
+  ...emptyTargetForm,
 };
 
 const emptySyncGroupForm: SyncGroupForm = {
@@ -229,7 +238,8 @@ function platformLabel(value?: string) {
 function accountToForm(account: UpstreamSyncAccount): SyncAccountForm {
   return {
     id: account.id,
-    source_kind: account.source_kind === "gateway_group" ? "gateway_group" : "channel",
+    source_kind:
+      account.source_kind === "gateway_group" ? "gateway_group" : "channel",
     source_channel_id: account.source_channel_id,
     source_group_id:
       account.source_group_id == null ? "" : String(account.source_group_id),
@@ -390,7 +400,9 @@ function TestModelPicker({
   const modelList = uniqueModels([...models, selectedModel]);
   const hasCustomModel =
     customModel &&
-    !modelList.some((model) => model.toLowerCase() === customModel.toLowerCase());
+    !modelList.some(
+      (model) => model.toLowerCase() === customModel.toLowerCase(),
+    );
   const label = !enabled ? "不测试" : selectedModel || "自动选择";
 
   useEffect(() => {
@@ -509,6 +521,16 @@ export function UpstreamSyncSettings() {
   >({});
   const [logs, setLogs] = useState<UpstreamSyncLog[]>([]);
   const [targetForm, setTargetForm] = useState<TargetForm>(emptyTargetForm);
+  const [newAPITargetForm, setNewAPITargetForm] = useState<NewAPITargetForm>(
+    emptyNewAPITargetForm,
+  );
+  const [newAPITargetDialogOpen, setNewAPITargetDialogOpen] = useState(false);
+  const [autoGroupsDialogTarget, setAutoGroupsDialogTarget] =
+    useState<UpstreamSyncTarget | null>(null);
+  const [autoGroups, setAutoGroups] = useState<string[]>([]);
+  const [availableAutoGroups, setAvailableAutoGroups] = useState<string[]>([]);
+  const [newAutoGroup, setNewAutoGroup] = useState("");
+  const [autoGroupsLoading, setAutoGroupsLoading] = useState(false);
   const [syncGroupForm, setSyncGroupForm] =
     useState<SyncGroupForm>(emptySyncGroupForm);
   const [selectedTargetID, setSelectedTargetID] = useState<number | null>(null);
@@ -571,6 +593,16 @@ export function UpstreamSyncSettings() {
         (syncGroup) => syncGroup.target_id === selectedTargetID,
       ),
     [syncGroupList, selectedTargetID],
+  );
+
+  const sub2APITargets = useMemo(
+    () => targets.filter((target) => target.target_type !== "newapi"),
+    [targets],
+  );
+
+  const newAPITargets = useMemo(
+    () => targets.filter((target) => target.target_type === "newapi"),
+    [targets],
   );
 
   const activeLogSyncGroup = useMemo(
@@ -684,6 +716,111 @@ export function UpstreamSyncSettings() {
     setTargetDialogOpen(true);
   }
 
+  function openNewAPITargetDialog(target?: UpstreamSyncTarget) {
+    setNewAPITargetForm(
+      target
+        ? {
+            id: target.id,
+            name: target.name,
+            base_url: target.base_url,
+            admin_api_key: "",
+            enabled: target.enabled,
+          }
+        : emptyNewAPITargetForm,
+    );
+    setNewAPITargetDialogOpen(true);
+  }
+
+  async function saveNewAPITarget() {
+    setBusy("newapi-target");
+    try {
+      const path = newAPITargetForm.id
+        ? `/upstream-sync/targets/${newAPITargetForm.id}`
+        : "/upstream-sync/targets";
+      await apiFetch(path, {
+        method: newAPITargetForm.id ? "PUT" : "POST",
+        body: JSON.stringify({ ...newAPITargetForm, target_type: "newapi" }),
+      });
+      setNewAPITargetForm(emptyNewAPITargetForm);
+      setNewAPITargetDialogOpen(false);
+      await loadBase();
+      toast.success("New API 上游已保存");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "保存 New API 上游失败");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const openAutoGroupsDialog = useCallback(
+    async (target: UpstreamSyncTarget) => {
+      setAutoGroupsDialogTarget(target);
+      setAutoGroups([]);
+      setAvailableAutoGroups([]);
+      setNewAutoGroup("");
+      setAutoGroupsLoading(true);
+      try {
+        const result = await apiFetch<NewAPIAutoGroups>(
+          `/upstream-sync/targets/${target.id}/newapi/auto-groups`,
+        );
+        setAutoGroups(result.groups ?? []);
+        setAvailableAutoGroups(result.available_groups ?? []);
+      } catch (err) {
+        setAutoGroupsDialogTarget(null);
+        toast.error(err instanceof Error ? err.message : "加载自动分组失败");
+      } finally {
+        setAutoGroupsLoading(false);
+      }
+    },
+    [],
+  );
+
+  async function saveAutoGroups() {
+    if (!autoGroupsDialogTarget) return;
+    setBusy(`auto-groups-${autoGroupsDialogTarget.id}`);
+    try {
+      const result = await apiFetch<NewAPIAutoGroups>(
+        `/upstream-sync/targets/${autoGroupsDialogTarget.id}/newapi/auto-groups`,
+        { method: "PUT", body: JSON.stringify({ groups: autoGroups }) },
+      );
+      setAutoGroups(result.groups ?? []);
+      await loadBase();
+      toast.success("自动分组顺序已保存");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "保存自动分组失败");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function addAutoGroup() {
+    const name = newAutoGroup.trim();
+    if (!name) return;
+    if (autoGroups.includes(name)) {
+      toast.error("该分组已在自动分组列表中");
+      return;
+    }
+    setAutoGroups((groups) => [...groups, name]);
+    setNewAutoGroup("");
+  }
+
+  function moveAutoGroup(index: number, direction: -1 | 1) {
+    setAutoGroups((groups) => {
+      const nextIndex = index + direction;
+      if (nextIndex < 0 || nextIndex >= groups.length) return groups;
+      const next = [...groups];
+      [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+      return next;
+    });
+  }
+
+  function toggleAvailableAutoGroup(group: string, checked: boolean) {
+    setAutoGroups((groups) => {
+      if (checked) return groups.includes(group) ? groups : [...groups, group];
+      return groups.filter((item) => item !== group);
+    });
+  }
+
   async function saveTarget() {
     setBusy("target");
     try {
@@ -759,9 +896,13 @@ export function UpstreamSyncSettings() {
   }
 
   async function deleteTarget(target: UpstreamSyncTarget) {
+    const targetLabel = target.target_type === "newapi" ? "New API" : "Sub2API";
     const ok = await confirm({
-      title: `删除 Sub2API 上游 ${target.name}？`,
-      description: "会同时删除该上游下的本地同步分组、分组缓存和执行日志。",
+      title: `删除 ${targetLabel} 上游 ${target.name}？`,
+      description:
+        target.target_type === "newapi"
+          ? "只删除本地连接配置，不会修改远端 New API 设置。"
+          : "会同时删除该上游下的本地同步分组、分组缓存和执行日志。",
       confirmLabel: "删除",
       destructive: true,
     });
@@ -775,9 +916,11 @@ export function UpstreamSyncSettings() {
         setSelectedTargetID(null);
       }
       await loadBase();
-      toast.success("Sub2API 上游已删除");
+      toast.success(`${targetLabel} 上游已删除`);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "删除 Sub2API 上游失败");
+      toast.error(
+        err instanceof Error ? err.message : `删除 ${targetLabel} 上游失败`,
+      );
     } finally {
       setBusy(null);
     }
@@ -811,7 +954,9 @@ export function UpstreamSyncSettings() {
       accounts:
         allAccounts.filter((account) => account.source_kind !== "gateway_group")
           .length > 0
-          ? allAccounts.filter((account) => account.source_kind !== "gateway_group")
+          ? allAccounts.filter(
+              (account) => account.source_kind !== "gateway_group",
+            )
           : [{ ...emptySyncAccountForm }],
       gateway_rate_sync: gatewayRateSync,
       enabled: syncGroup.enabled ?? true,
@@ -1004,11 +1149,11 @@ export function UpstreamSyncSettings() {
           </Button>
         }
       >
-        {targets.length === 0 ? (
+        {sub2APITargets.length === 0 ? (
           <EmptyBox text="还没有 Sub2API 上游配置。" />
         ) : (
           <div className="space-y-3">
-            {targets.map((target) => {
+            {sub2APITargets.map((target) => {
               const syncGroupCount = syncGroupList.filter(
                 (syncGroup) => syncGroup.target_id === target.id,
               ).length;
@@ -1120,7 +1265,9 @@ export function UpstreamSyncSettings() {
                         busy={busy}
                         onAdd={() => openNewSyncGroupDialog(target.id)}
                         onRefresh={() => refreshSyncGroups(target)}
-                        refreshBusy={busy === `sync-groups-refresh-${target.id}`}
+                        refreshBusy={
+                          busy === `sync-groups-refresh-${target.id}`
+                        }
                         onApply={applySyncGroup}
                         onLogs={loadLogs}
                         onEdit={openEditSyncGroupDialog}
@@ -1132,6 +1279,114 @@ export function UpstreamSyncSettings() {
                 </div>
               );
             })}
+          </div>
+        )}
+      </Panel>
+
+      <Panel
+        title="New API 上游列表"
+        description="用于管理 New API 管理员设置中的自动分组顺序。该列表不会进入 Sub2API 的账号托管同步流程。"
+        action={
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => openNewAPITargetDialog()}
+          >
+            <Plus className="size-3.5" />
+            新增 New API
+          </Button>
+        }
+      >
+        {newAPITargets.length === 0 ? (
+          <EmptyBox text="还没有 New API 上游配置。" />
+        ) : (
+          <div className="space-y-3">
+            {newAPITargets.map((target) => (
+              <div
+                key={target.id}
+                className="rounded-2xl border border-border bg-background/80 p-4"
+              >
+                <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="truncate text-sm font-semibold text-foreground">
+                        {target.name}
+                      </p>
+                      <Badge variant="outline">New API</Badge>
+                      <StatusBadge
+                        status={target.enabled ? "enabled" : "disabled"}
+                      />
+                      {target.last_check_status ? (
+                        <StatusBadge status={target.last_check_status} />
+                      ) : null}
+                    </div>
+                    <p className="break-all text-xs text-muted-foreground">
+                      {target.base_url}
+                    </p>
+                    <p
+                      className={cn(
+                        "text-xs",
+                        target.last_check_error
+                          ? "text-destructive"
+                          : "text-muted-foreground",
+                      )}
+                    >
+                      {target.last_check_error
+                        ? target.last_check_error
+                        : target.last_check_at
+                          ? `上次检测 ${relativeTime(target.last_check_at)}`
+                          : "尚未检测"}
+                    </p>
+                  </div>
+                  <div className="flex w-full items-center gap-2 xl:w-auto xl:justify-end">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 flex-1 px-3 xl:flex-none"
+                      onClick={() => void openAutoGroupsDialog(target)}
+                    >
+                      <ListTree className="size-3.5" />
+                      自动分组
+                    </Button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          size="icon-sm"
+                          variant="outline"
+                          aria-label="New API 上游操作"
+                        >
+                          <MoreHorizontal className="size-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-44">
+                        <DropdownMenuItem
+                          onSelect={() => checkTarget(target)}
+                          disabled={busy === `check-${target.id}`}
+                        >
+                          <CheckCircle2 className="size-4" />
+                          检测连接
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onSelect={() => openNewAPITargetDialog(target)}
+                        >
+                          <PencilLine className="size-4" />
+                          编辑上游
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          variant="destructive"
+                          onSelect={() => deleteTarget(target)}
+                          disabled={busy === `delete-target-${target.id}`}
+                        >
+                          <Trash2 className="size-4" />
+                          删除上游
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                </div>
+              </div>
+            ))}
           </div>
         )}
       </Panel>
@@ -1336,6 +1591,247 @@ export function UpstreamSyncSettings() {
         </DialogContent>
       </Dialog>
 
+      <Dialog
+        open={newAPITargetDialogOpen}
+        onOpenChange={(open) => {
+          setNewAPITargetDialogOpen(open);
+          if (!open) setNewAPITargetForm(emptyNewAPITargetForm);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {newAPITargetForm.id ? "编辑 New API 上游" : "新增 New API 上游"}
+            </DialogTitle>
+            <DialogDescription>
+              使用 New API Root 权限令牌读取和更新管理员设置中的
+              AutoGroups。令牌留空则保留原值。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <Field label="名称">
+              <Input
+                value={newAPITargetForm.name}
+                onChange={(e) =>
+                  setNewAPITargetForm((prev) => ({
+                    ...prev,
+                    name: e.target.value,
+                  }))
+                }
+              />
+            </Field>
+            <Field label="New API 地址">
+              <Input
+                value={newAPITargetForm.base_url}
+                placeholder="https://new-api.example.com"
+                onChange={(e) =>
+                  setNewAPITargetForm((prev) => ({
+                    ...prev,
+                    base_url: e.target.value,
+                  }))
+                }
+              />
+            </Field>
+            <Field label="Root API Token">
+              <Input
+                type="password"
+                autoComplete="new-password"
+                value={newAPITargetForm.admin_api_key}
+                placeholder={
+                  newAPITargetForm.id ? "留空则保留原值" : "New API Root Token"
+                }
+                onChange={(e) =>
+                  setNewAPITargetForm((prev) => ({
+                    ...prev,
+                    admin_api_key: e.target.value,
+                  }))
+                }
+              />
+            </Field>
+            <SwitchLine
+              id="newapi-target-enabled"
+              label="启用上游"
+              description="禁用后仍保留连接配置，但不会用于后续同步操作。"
+              checked={newAPITargetForm.enabled}
+              onCheckedChange={(enabled) =>
+                setNewAPITargetForm((prev) => ({ ...prev, enabled }))
+              }
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setNewAPITargetDialogOpen(false)}
+            >
+              取消编辑
+            </Button>
+            <Button
+              onClick={saveNewAPITarget}
+              disabled={busy === "newapi-target"}
+            >
+              保存上游
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={autoGroupsDialogTarget != null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setAutoGroupsDialogTarget(null);
+            setAutoGroups([]);
+            setAvailableAutoGroups([]);
+            setNewAutoGroup("");
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>自动分组顺序</DialogTitle>
+            <DialogDescription>
+              {autoGroupsDialogTarget
+                ? `${autoGroupsDialogTarget.name} 的 AutoGroups 按从上到下的顺序生效。`
+                : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            {availableAutoGroups.length > 0 ? (
+              <div className="space-y-2">
+                <Label>选择已有分组</Label>
+                <div className="grid max-h-36 grid-cols-1 gap-1 overflow-y-auto rounded-md border p-2 sm:grid-cols-2">
+                  {availableAutoGroups.map((group) => {
+                    const checked = autoGroups.includes(group);
+                    return (
+                      <label
+                        key={group}
+                        className="flex min-w-0 cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-muted/60"
+                      >
+                        <Checkbox
+                          checked={checked}
+                          disabled={autoGroupsLoading}
+                          onCheckedChange={(value) =>
+                            toggleAvailableAutoGroup(group, value === true)
+                          }
+                        />
+                        <span className="min-w-0 flex-1 truncate">{group}</span>
+                        {checked ? (
+                          <span className="text-xs tabular-nums text-muted-foreground">
+                            {autoGroups.indexOf(group) + 1}
+                          </span>
+                        ) : null}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+            <div className="flex gap-2">
+              <Input
+                value={newAutoGroup}
+                placeholder="输入分组名称"
+                disabled={autoGroupsLoading}
+                onChange={(e) => setNewAutoGroup(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    addAutoGroup();
+                  }
+                }}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                onClick={addAutoGroup}
+                disabled={autoGroupsLoading}
+              >
+                <Plus className="size-4" />
+                添加
+              </Button>
+            </div>
+            <div className="max-h-72 space-y-2 overflow-y-auto rounded-md border p-2">
+              {autoGroupsLoading ? (
+                <p className="px-2 py-5 text-center text-sm text-muted-foreground">
+                  加载中...
+                </p>
+              ) : autoGroups.length === 0 ? (
+                <p className="px-2 py-5 text-center text-sm text-muted-foreground">
+                  尚未配置自动分组。
+                </p>
+              ) : (
+                autoGroups.map((group, index) => (
+                  <div
+                    key={group}
+                    className="flex items-center gap-2 rounded-md border bg-background px-2 py-1.5"
+                  >
+                    <span className="w-6 text-center text-xs tabular-nums text-muted-foreground">
+                      {index + 1}
+                    </span>
+                    <span className="min-w-0 flex-1 break-all text-sm">
+                      {group}
+                    </span>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="size-7"
+                      title="上移"
+                      disabled={index === 0}
+                      onClick={() => moveAutoGroup(index, -1)}
+                    >
+                      <ChevronUp className="size-4" />
+                      <span className="sr-only">上移</span>
+                    </Button>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="size-7"
+                      title="下移"
+                      disabled={index === autoGroups.length - 1}
+                      onClick={() => moveAutoGroup(index, 1)}
+                    >
+                      <ChevronDown className="size-4" />
+                      <span className="sr-only">下移</span>
+                    </Button>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="size-7 text-destructive hover:text-destructive"
+                      title="移除"
+                      onClick={() =>
+                        setAutoGroups((groups) =>
+                          groups.filter((_, i) => i !== index),
+                        )
+                      }
+                    >
+                      <Trash2 className="size-4" />
+                      <span className="sr-only">移除</span>
+                    </Button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setAutoGroupsDialogTarget(null)}
+            >
+              取消
+            </Button>
+            <Button
+              onClick={saveAutoGroups}
+              disabled={
+                autoGroupsLoading ||
+                (autoGroupsDialogTarget != null &&
+                  busy === `auto-groups-${autoGroupsDialogTarget.id}`)
+              }
+            >
+              保存顺序
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {dialog}
     </div>
   );
@@ -1486,7 +1982,9 @@ function SyncGroupList({
                         <DropdownMenuItem
                           variant="destructive"
                           onSelect={() => onDelete(syncGroup)}
-                          disabled={busy === `sync-group-delete-${syncGroup.id}`}
+                          disabled={
+                            busy === `sync-group-delete-${syncGroup.id}`
+                          }
                         >
                           <Trash2 className="size-4" />
                           删除同步分组
@@ -1956,322 +2454,348 @@ function SyncGroupFormView({
       </section>
 
       {syncGroupForm.sync_mode === "account" ? (
-      <section className="rounded-xl border border-border bg-background/80 p-3 sm:p-4">
-        <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-          <div className="space-y-1">
-            <p className="text-sm font-semibold text-foreground">同步账号</p>
-            <p className="text-xs text-muted-foreground">
-              每行会独立创建源 API Key 和目标账号。
-            </p>
+        <section className="rounded-xl border border-border bg-background/80 p-3 sm:p-4">
+          <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="space-y-1">
+              <p className="text-sm font-semibold text-foreground">同步账号</p>
+              <p className="text-xs text-muted-foreground">
+                每行会独立创建源 API Key 和目标账号。
+              </p>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="w-full sm:w-auto"
+              onClick={addAccount}
+            >
+              <Plus className="size-3.5" />
+              添加账号
+            </Button>
           </div>
-          <Button
-            size="sm"
-            variant="outline"
-            className="w-full sm:w-auto"
-            onClick={addAccount}
-          >
-            <Plus className="size-3.5" />
-            添加账号
-          </Button>
-        </div>
 
-        <div className="overflow-x-auto">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="min-w-44">源渠道</TableHead>
-                <TableHead className="min-w-44">源分组</TableHead>
-                <TableHead className="min-w-28">倍率换算</TableHead>
-                <TableHead className="min-w-32">账号计费倍率</TableHead>
-                <TableHead className="min-w-28">权重/负载</TableHead>
-                <TableHead className="min-w-24">并发</TableHead>
-                <TableHead className="min-w-32">代理</TableHead>
-                <TableHead className="min-w-24">状态</TableHead>
-                <TableHead className="min-w-56">
-                  <span className="flex items-center gap-1">
-                    测试模型
-                    <Tooltip delayDuration={150}>
-                      <TooltipTrigger asChild>
-                        <button
-                          type="button"
-                          className="text-muted-foreground transition-colors hover:text-foreground"
-                        >
-                          <HelpCircle className="size-3.5" />
-                          <span className="sr-only">测试功能说明</span>
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent side="top" className="max-w-64 text-xs">
-                        选择模型后，应用同步会调用 Sub2API 测试目标账号；测试通过启用调度，失败禁用调度。
-                      </TooltipContent>
-                    </Tooltip>
-                  </span>
-                </TableHead>
-                <TableHead className="w-12" />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {sortedAccountRows.map(({ account, index, rate }) => {
-                const sourceGroups = sourceGroupsFor(account);
-                const calculatedRate = rate;
-                const selectedTestModel = account.test_model.trim();
-                const sourceTestModels = sourceModelsByRow[index] ?? [];
-                const rowTestModels = uniqueModels([
-                  ...testModelOptions,
-                  ...sourceTestModels,
-                  selectedTestModel,
-                ]);
-                const isLoadingModels = sourceModelsLoadingByRow[index];
-                return (
-                  <TableRow key={account.id ?? index}>
-                    <TableCell>
-                      <Select
-                        value={
-                          account.source_channel_id
-                            ? String(account.source_channel_id)
-                            : "0"
-                        }
-                        onValueChange={(value) => {
-                          const channelID = Number(value);
-                          const nextAccount = {
-                            ...account,
-                            source_channel_id: channelID,
-                            source_group_id: "",
-                            source_group_name: "",
-                            test_model: "",
-                          };
-                          updateAccount(index, nextAccount);
-                          void onLoadSourceGroups(channelID);
-                          void loadSourceModels(
-                            index,
-                            syncGroupForm.platform,
-                            nextAccount,
-                          );
-                        }}
-                      >
-                        <SelectTrigger className="w-44">
-                          <SelectValue placeholder="选择源渠道" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="0">请选择</SelectItem>
-                          {channels.map((channel) => (
-                            <SelectItem
-                              key={channel.id}
-                              value={String(channel.id)}
-                            >
-                              {channel.name}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </TableCell>
-                    <TableCell>
-                      <Select
-                        value={sourceGroupSelectValue(account)}
-                        onValueChange={(value) => {
-                          const sourceGroup = sourceGroups.find(
-                            (group) => sourceGroupOptionValue(group) === value,
-                          );
-                          const patch = {
-                            source_group_id:
-                              sourceGroup?.remote_group_id == null
-                                ? ""
-                                : String(sourceGroup.remote_group_id),
-                            // 有 ID 时也保留名称（sub2api）；仅 none 时清空
-                            source_group_name:
-                              value === "none"
-                                ? ""
-                                : (sourceGroup?.model_name ?? "").trim(),
-                            test_model: "",
-                          };
-                          const nextAccount = { ...account, ...patch };
-                          updateAccount(index, patch);
-                          void loadSourceModels(
-                            index,
-                            syncGroupForm.platform,
-                            nextAccount,
-                          );
-                        }}
-                        disabled={!account.source_channel_id}
-                      >
-                        <SelectTrigger className="w-44">
-                          {(() => {
-                            const selected = sourceGroups.find(
-                              (g) => sourceGroupOptionValue(g) === sourceGroupSelectValue(account),
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="min-w-44">源渠道</TableHead>
+                  <TableHead className="min-w-44">源分组</TableHead>
+                  <TableHead className="min-w-28">倍率换算</TableHead>
+                  <TableHead className="min-w-32">账号计费倍率</TableHead>
+                  <TableHead className="min-w-28">权重/负载</TableHead>
+                  <TableHead className="min-w-24">并发</TableHead>
+                  <TableHead className="min-w-32">代理</TableHead>
+                  <TableHead className="min-w-24">状态</TableHead>
+                  <TableHead className="min-w-56">
+                    <span className="flex items-center gap-1">
+                      测试模型
+                      <Tooltip delayDuration={150}>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            className="text-muted-foreground transition-colors hover:text-foreground"
+                          >
+                            <HelpCircle className="size-3.5" />
+                            <span className="sr-only">测试功能说明</span>
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" className="max-w-64 text-xs">
+                          选择模型后，应用同步会调用 Sub2API
+                          测试目标账号；测试通过启用调度，失败禁用调度。
+                        </TooltipContent>
+                      </Tooltip>
+                    </span>
+                  </TableHead>
+                  <TableHead className="w-12" />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {sortedAccountRows.map(({ account, index, rate }) => {
+                  const sourceGroups = sourceGroupsFor(account);
+                  const calculatedRate = rate;
+                  const selectedTestModel = account.test_model.trim();
+                  const sourceTestModels = sourceModelsByRow[index] ?? [];
+                  const rowTestModels = uniqueModels([
+                    ...testModelOptions,
+                    ...sourceTestModels,
+                    selectedTestModel,
+                  ]);
+                  const isLoadingModels = sourceModelsLoadingByRow[index];
+                  return (
+                    <TableRow key={account.id ?? index}>
+                      <TableCell>
+                        <Select
+                          value={
+                            account.source_channel_id
+                              ? String(account.source_channel_id)
+                              : "0"
+                          }
+                          onValueChange={(value) => {
+                            const channelID = Number(value);
+                            const nextAccount = {
+                              ...account,
+                              source_channel_id: channelID,
+                              source_group_id: "",
+                              source_group_name: "",
+                              test_model: "",
+                            };
+                            updateAccount(index, nextAccount);
+                            void onLoadSourceGroups(channelID);
+                            void loadSourceModels(
+                              index,
+                              syncGroupForm.platform,
+                              nextAccount,
                             );
-                            if (selected) {
-                              return <SelectValue>{selected.model_name} · {formatRatio(selected.ratio)}</SelectValue>;
-                            }
-                            return <SelectValue placeholder="不绑定分组" />;
-                          })()}
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="none">不绑定分组</SelectItem>
-                          {sourceGroups.map((group) => (
-                            <SelectItem
-                              key={group.id}
-                              value={sourceGroupOptionValue(group)}
-                            >
-                              <span className="flex flex-col items-start">
-                                <span>{group.model_name} · {formatRatio(group.ratio)}</span>
-                                <span className="max-w-96 whitespace-normal break-words text-[11px] text-muted-foreground">
-                                  {group.description || "无描述"}
+                          }}
+                        >
+                          <SelectTrigger className="w-44">
+                            <SelectValue placeholder="选择源渠道" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="0">请选择</SelectItem>
+                            {channels.map((channel) => (
+                              <SelectItem
+                                key={channel.id}
+                                value={String(channel.id)}
+                              >
+                                {channel.name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </TableCell>
+                      <TableCell>
+                        <Select
+                          value={sourceGroupSelectValue(account)}
+                          onValueChange={(value) => {
+                            const sourceGroup = sourceGroups.find(
+                              (group) =>
+                                sourceGroupOptionValue(group) === value,
+                            );
+                            const patch = {
+                              source_group_id:
+                                sourceGroup?.remote_group_id == null
+                                  ? ""
+                                  : String(sourceGroup.remote_group_id),
+                              // 有 ID 时也保留名称（sub2api）；仅 none 时清空
+                              source_group_name:
+                                value === "none"
+                                  ? ""
+                                  : (sourceGroup?.model_name ?? "").trim(),
+                              test_model: "",
+                            };
+                            const nextAccount = { ...account, ...patch };
+                            updateAccount(index, patch);
+                            void loadSourceModels(
+                              index,
+                              syncGroupForm.platform,
+                              nextAccount,
+                            );
+                          }}
+                          disabled={!account.source_channel_id}
+                        >
+                          <SelectTrigger className="w-44">
+                            {(() => {
+                              const selected = sourceGroups.find(
+                                (g) =>
+                                  sourceGroupOptionValue(g) ===
+                                  sourceGroupSelectValue(account),
+                              );
+                              if (selected) {
+                                return (
+                                  <SelectValue>
+                                    {selected.model_name} ·{" "}
+                                    {formatRatio(selected.ratio)}
+                                  </SelectValue>
+                                );
+                              }
+                              return <SelectValue placeholder="不绑定分组" />;
+                            })()}
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="none">不绑定分组</SelectItem>
+                            {sourceGroups.map((group) => (
+                              <SelectItem
+                                key={group.id}
+                                value={sourceGroupOptionValue(group)}
+                              >
+                                <span className="flex flex-col items-start">
+                                  <span>
+                                    {group.model_name} ·{" "}
+                                    {formatRatio(group.ratio)}
+                                  </span>
+                                  <span className="max-w-96 whitespace-normal break-words text-[11px] text-muted-foreground">
+                                    {group.description || "无描述"}
+                                  </span>
                                 </span>
-                              </span>
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </TableCell>
-                    <TableCell>
-                      <Select
-                        value={account.rate_convert_mode}
-                        onValueChange={(value) =>
-                          updateAccount(index, {
-                            rate_convert_mode:
-                              value as UpstreamSyncRateConvertMode,
-                          })
-                        }
-                      >
-                        <SelectTrigger className="w-28">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="raw">原值</SelectItem>
-                          <SelectItem value="multiply_100">x100</SelectItem>
-                          <SelectItem value="divide_100">/100</SelectItem>
-                          <SelectItem value="custom">自定义</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </TableCell>
-                    <TableCell>
-                      <Input
-                        className="w-32"
-                        type="text"
-                        inputMode="decimal"
-                        step="0.0001"
-                        value={
-                          account.rate_convert_mode === "custom"
-                            ? String(account.rate_convert_value)
-                            : formatRate(calculatedRate)
-                        }
-                        disabled={account.rate_convert_mode !== "custom"}
-                        onChange={(e) =>
-                          updateAccount(index, {
-                            rate_convert_value: e.target.value,
-                          })
-                        }
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Input
-                        className="w-28"
-                        type="number"
-                        step="0.01"
-                        value={String(account.weight)}
-                        onChange={(e) =>
-                          updateAccount(index, { weight: num(e.target.value) })
-                        }
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Input
-                        className="w-24"
-                        type="number"
-                        value={String(account.concurrency)}
-                        onChange={(e) =>
-                          updateAccount(index, {
-                            concurrency: num(e.target.value),
-                          })
-                        }
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Select
-                        value={account.proxy_id || "none"}
-                        onValueChange={(value) =>
-                          updateAccount(index, {
-                            proxy_id: value === "none" ? "" : value,
-                          })
-                        }
-                      >
-                        <SelectTrigger className="w-32">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="none">不使用代理</SelectItem>
-                          {targetProxies.map((proxy) => (
-                            <SelectItem key={proxy.id} value={String(proxy.id)}>
-                              {proxy.name} · {proxy.protocol} · {proxy.host}:
-                              {proxy.port}
-                            </SelectItem>
-                          ))}
-                          {account.proxy_id &&
-                          !targetProxies.some(
-                            (proxy) => String(proxy.id) === account.proxy_id,
-                          ) ? (
-                            <SelectItem value={account.proxy_id}>
-                              代理 ID {account.proxy_id}
-                            </SelectItem>
-                          ) : null}
-                        </SelectContent>
-                      </Select>
-                    </TableCell>
-                    <TableCell>
-                      <Select
-                        value={account.enabled ? "enabled" : "disabled"}
-                        onValueChange={(value) =>
-                          updateAccount(index, { enabled: value === "enabled" })
-                        }
-                      >
-                        <SelectTrigger className="w-24">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="enabled">启用</SelectItem>
-                          <SelectItem value="disabled">禁用</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </TableCell>
-                    <TableCell>
-                      <TestModelPicker
-                        enabled={account.test_enabled}
-                        value={selectedTestModel}
-                        models={rowTestModels}
-                        loading={isLoadingModels}
-                        onChange={(enabled, model) =>
-                          updateAccount(index, {
-                            test_enabled: enabled,
-                            test_model: model,
-                          })
-                        }
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Button
-                        size="icon-sm"
-                        variant="ghost"
-                        className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-                        onClick={() => removeAccount(index)}
-                        disabled={syncGroupForm.accounts.length <= 1}
-                      >
-                        <Trash2 className="size-4" />
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        </div>
-      </section>
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </TableCell>
+                      <TableCell>
+                        <Select
+                          value={account.rate_convert_mode}
+                          onValueChange={(value) =>
+                            updateAccount(index, {
+                              rate_convert_mode:
+                                value as UpstreamSyncRateConvertMode,
+                            })
+                          }
+                        >
+                          <SelectTrigger className="w-28">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="raw">原值</SelectItem>
+                            <SelectItem value="multiply_100">x100</SelectItem>
+                            <SelectItem value="divide_100">/100</SelectItem>
+                            <SelectItem value="custom">自定义</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </TableCell>
+                      <TableCell>
+                        <Input
+                          className="w-32"
+                          type="text"
+                          inputMode="decimal"
+                          step="0.0001"
+                          value={
+                            account.rate_convert_mode === "custom"
+                              ? String(account.rate_convert_value)
+                              : formatRate(calculatedRate)
+                          }
+                          disabled={account.rate_convert_mode !== "custom"}
+                          onChange={(e) =>
+                            updateAccount(index, {
+                              rate_convert_value: e.target.value,
+                            })
+                          }
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <Input
+                          className="w-28"
+                          type="number"
+                          step="0.01"
+                          value={String(account.weight)}
+                          onChange={(e) =>
+                            updateAccount(index, {
+                              weight: num(e.target.value),
+                            })
+                          }
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <Input
+                          className="w-24"
+                          type="number"
+                          value={String(account.concurrency)}
+                          onChange={(e) =>
+                            updateAccount(index, {
+                              concurrency: num(e.target.value),
+                            })
+                          }
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <Select
+                          value={account.proxy_id || "none"}
+                          onValueChange={(value) =>
+                            updateAccount(index, {
+                              proxy_id: value === "none" ? "" : value,
+                            })
+                          }
+                        >
+                          <SelectTrigger className="w-32">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="none">不使用代理</SelectItem>
+                            {targetProxies.map((proxy) => (
+                              <SelectItem
+                                key={proxy.id}
+                                value={String(proxy.id)}
+                              >
+                                {proxy.name} · {proxy.protocol} · {proxy.host}:
+                                {proxy.port}
+                              </SelectItem>
+                            ))}
+                            {account.proxy_id &&
+                            !targetProxies.some(
+                              (proxy) => String(proxy.id) === account.proxy_id,
+                            ) ? (
+                              <SelectItem value={account.proxy_id}>
+                                代理 ID {account.proxy_id}
+                              </SelectItem>
+                            ) : null}
+                          </SelectContent>
+                        </Select>
+                      </TableCell>
+                      <TableCell>
+                        <Select
+                          value={account.enabled ? "enabled" : "disabled"}
+                          onValueChange={(value) =>
+                            updateAccount(index, {
+                              enabled: value === "enabled",
+                            })
+                          }
+                        >
+                          <SelectTrigger className="w-24">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="enabled">启用</SelectItem>
+                            <SelectItem value="disabled">禁用</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </TableCell>
+                      <TableCell>
+                        <TestModelPicker
+                          enabled={account.test_enabled}
+                          value={selectedTestModel}
+                          models={rowTestModels}
+                          loading={isLoadingModels}
+                          onChange={(enabled, model) =>
+                            updateAccount(index, {
+                              test_enabled: enabled,
+                              test_model: model,
+                            })
+                          }
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <Button
+                          size="icon-sm"
+                          variant="ghost"
+                          className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                          onClick={() => removeAccount(index)}
+                          disabled={syncGroupForm.accounts.length <= 1}
+                        >
+                          <Trash2 className="size-4" />
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </div>
+        </section>
       ) : null}
 
       {syncGroupForm.sync_mode === "gateway_rate" ? (
-        <GatewayRateSyncCard syncGroupForm={syncGroupForm} onChange={onChange} />
+        <GatewayRateSyncCard
+          syncGroupForm={syncGroupForm}
+          onChange={onChange}
+        />
       ) : null}
 
       <DialogFooter className="sticky bottom-0 -mx-3 border-t bg-background/95 px-3 pt-3 backdrop-blur sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:px-0 sm:pt-0">
-        <Button variant="outline" className="w-full sm:w-auto" onClick={onCancel}>
+        <Button
+          variant="outline"
+          className="w-full sm:w-auto"
+          onClick={onCancel}
+        >
           取消
         </Button>
         <Button
@@ -2389,9 +2913,7 @@ function GatewayRateSyncCard({
       )
     : 0;
   const rateVariable =
-    rateSync?.gateway_rate_mode === "min"
-      ? "网关组最低倍率"
-      : "网关组最高倍率";
+    rateSync?.gateway_rate_mode === "min" ? "网关组最低倍率" : "网关组最高倍率";
 
   return (
     <section className="rounded-xl border border-border bg-background/80 p-3 sm:p-4">
@@ -2423,7 +2945,10 @@ function GatewayRateSyncCard({
                     value={rateSync.source_kind}
                     onValueChange={(value) => {
                       if (value === "0") {
-                        onChange((prev) => ({ ...prev, gateway_rate_sync: null }));
+                        onChange((prev) => ({
+                          ...prev,
+                          gateway_rate_sync: null,
+                        }));
                         return;
                       }
                       setRateSync({ source_kind: "gateway_group" });
@@ -2442,11 +2967,15 @@ function GatewayRateSyncCard({
                   <Select
                     value={rateSync.gateway_group_id || "0"}
                     onValueChange={(value) =>
-                      setRateSync({ gateway_group_id: value === "0" ? "" : value })
+                      setRateSync({
+                        gateway_group_id: value === "0" ? "" : value,
+                      })
                     }
                   >
                     <SelectTrigger className="w-44">
-                      <SelectValue placeholder={groupsLoading ? "加载中..." : "选择网关"} />
+                      <SelectValue
+                        placeholder={groupsLoading ? "加载中..." : "选择网关"}
+                      />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="0">请选择</SelectItem>
@@ -2489,7 +3018,8 @@ function GatewayRateSyncCard({
                       value={rateSync.rate_convert_mode}
                       onValueChange={(value) =>
                         setRateSync({
-                          rate_convert_mode: value as UpstreamSyncRateConvertMode,
+                          rate_convert_mode:
+                            value as UpstreamSyncRateConvertMode,
                         })
                       }
                     >
@@ -2554,7 +3084,9 @@ function GatewayRateSyncCard({
                 <TableCell>
                   <div className="space-y-0.5 font-mono text-xs tabular-nums">
                     <p>{rateVariable}</p>
-                    <p className="text-muted-foreground">= {formatRate(calculatedRate)}</p>
+                    <p className="text-muted-foreground">
+                      = {formatRate(calculatedRate)}
+                    </p>
                   </div>
                 </TableCell>
                 <TableCell>
@@ -2563,7 +3095,9 @@ function GatewayRateSyncCard({
                     type="number"
                     step="0.01"
                     value={String(rateSync.weight)}
-                    onChange={(e) => setRateSync({ weight: num(e.target.value) })}
+                    onChange={(e) =>
+                      setRateSync({ weight: num(e.target.value) })
+                    }
                   />
                 </TableCell>
                 <TableCell>
@@ -2623,7 +3157,10 @@ function applyGatewayRateOperation(
 function clampGatewayRate(value: number, minValue: number, maxValue: number) {
   const min = Math.max(0, minValue || 0);
   const max = Math.max(0, maxValue || 0);
-  return Math.min(max > 0 ? max : Number.POSITIVE_INFINITY, Math.max(min, value));
+  return Math.min(
+    max > 0 ? max : Number.POSITIVE_INFINITY,
+    Math.max(min, value),
+  );
 }
 
 function Panel({

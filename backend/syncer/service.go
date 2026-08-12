@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -90,6 +91,7 @@ func (s *Service) SetDispatcher(dispatcher *notify.Dispatcher) {
 type TargetDTO struct {
 	ID              uint       `json:"id"`
 	Name            string     `json:"name"`
+	TargetType      string     `json:"target_type"`
 	BaseURL         string     `json:"base_url"`
 	Enabled         bool       `json:"enabled"`
 	LastCheckStatus string     `json:"last_check_status,omitempty"`
@@ -213,9 +215,15 @@ type syncAccountApplyOutcome struct {
 
 type TargetInput struct {
 	Name        string `json:"name"`
+	TargetType  string `json:"target_type"`
 	BaseURL     string `json:"base_url"`
 	AdminAPIKey string `json:"admin_api_key"`
 	Enabled     bool   `json:"enabled"`
+}
+
+type NewAPIAutoGroupsDTO struct {
+	Groups          []string `json:"groups"`
+	AvailableGroups []string `json:"available_groups"`
 }
 
 func (s *Service) ListTargets() ([]TargetDTO, error) {
@@ -228,6 +236,7 @@ func (s *Service) ListTargets() ([]TargetDTO, error) {
 		out = append(out, TargetDTO{
 			ID:              item.ID,
 			Name:            item.Name,
+			TargetType:      normalizeTargetType(item.TargetType),
 			BaseURL:         item.BaseURL,
 			Enabled:         item.Enabled,
 			LastCheckStatus: item.LastCheckStatus,
@@ -239,12 +248,16 @@ func (s *Service) ListTargets() ([]TargetDTO, error) {
 }
 
 func (s *Service) CreateTarget(ctx context.Context, in TargetInput) (*TargetDTO, error) {
+	if err := validateTargetInput(in, true); err != nil {
+		return nil, err
+	}
 	enc, err := s.cipher.Encrypt(strings.TrimSpace(in.AdminAPIKey))
 	if err != nil {
 		return nil, err
 	}
 	item := &storage.UpstreamSyncTarget{
 		Name:              strings.TrimSpace(in.Name),
+		TargetType:        normalizeTargetType(in.TargetType),
 		BaseURL:           strings.TrimSpace(in.BaseURL),
 		AdminAPIKeyCipher: enc,
 		Enabled:           in.Enabled,
@@ -260,7 +273,14 @@ func (s *Service) UpdateTarget(ctx context.Context, id uint, in TargetInput) (*T
 	if err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(in.TargetType) == "" {
+		in.TargetType = item.TargetType
+	}
+	if err := validateTargetInput(in, false); err != nil {
+		return nil, err
+	}
 	item.Name = strings.TrimSpace(in.Name)
+	item.TargetType = normalizeTargetType(in.TargetType)
 	item.BaseURL = strings.TrimSpace(in.BaseURL)
 	if strings.TrimSpace(in.AdminAPIKey) != "" {
 		enc, err := s.cipher.Encrypt(strings.TrimSpace(in.AdminAPIKey))
@@ -285,13 +305,17 @@ func (s *Service) CheckTarget(ctx context.Context, id uint) error {
 	if err != nil {
 		return err
 	}
-	client := sub2api.NewAdminClient()
 	plain, err := s.cipher.Decrypt(item.AdminAPIKeyCipher)
 	if err != nil {
 		_ = s.targets.UpdateCheck(id, "failed", ptrTime(time.Now()), err.Error())
 		return err
 	}
-	err = client.Ping(ctx, sub2api.AdminTarget{BaseURL: item.BaseURL, APIKey: plain})
+	if normalizeTargetType(item.TargetType) == "newapi" {
+		_, err = s.getNewAPIAutoGroups(ctx, item.BaseURL, plain)
+	} else {
+		client := sub2api.NewAdminClient()
+		err = client.Ping(ctx, sub2api.AdminTarget{BaseURL: item.BaseURL, APIKey: plain})
+	}
 	status := "ok"
 	errText := ""
 	if err != nil {
@@ -307,6 +331,9 @@ func (s *Service) SyncTargetGroups(ctx context.Context, targetID uint) ([]Target
 	target, err := s.targets.FindByID(targetID)
 	if err != nil {
 		return nil, err
+	}
+	if normalizeTargetType(target.TargetType) != "sub2api" {
+		return nil, errors.New("target group sync is only supported for Sub2API targets")
 	}
 	plain, err := s.cipher.Decrypt(target.AdminAPIKeyCipher)
 	if err != nil {
@@ -346,6 +373,266 @@ func (s *Service) SyncTargetGroups(ctx context.Context, targetID uint) ([]Target
 	}
 	_ = s.groups.DeleteMissing(targetID, seen)
 	return out, nil
+}
+
+// GetNewAPIAutoGroups reads the administrator setting that controls New API's
+// automatic-group priority. The remote root token remains server-side.
+func (s *Service) GetNewAPIAutoGroups(ctx context.Context, targetID uint) (*NewAPIAutoGroupsDTO, error) {
+	target, apiKey, err := s.newAPITargetCredential(targetID)
+	if err != nil {
+		return nil, err
+	}
+	settings, err := s.getNewAPIGroupSettings(ctx, target.BaseURL, apiKey)
+	s.recordTargetCheck(targetID, err)
+	if err != nil {
+		return nil, err
+	}
+	return &NewAPIAutoGroupsDTO{
+		Groups:          settings.AutoGroups,
+		AvailableGroups: settings.AvailableGroups,
+	}, nil
+}
+
+// UpdateNewAPIAutoGroups replaces AutoGroups while preserving its ordered
+// semantics. Empty values and duplicates are discarded before writing.
+func (s *Service) UpdateNewAPIAutoGroups(ctx context.Context, targetID uint, groups []string) (*NewAPIAutoGroupsDTO, error) {
+	target, apiKey, err := s.newAPITargetCredential(targetID)
+	if err != nil {
+		return nil, err
+	}
+	normalized := normalizeAutoGroups(groups)
+	if err := s.putNewAPIAutoGroups(ctx, target.BaseURL, apiKey, normalized); err != nil {
+		s.recordTargetCheck(targetID, err)
+		return nil, err
+	}
+	s.recordTargetCheck(targetID, nil)
+	return &NewAPIAutoGroupsDTO{Groups: normalized}, nil
+}
+
+func normalizeTargetType(targetType string) string {
+	if strings.EqualFold(strings.TrimSpace(targetType), "newapi") {
+		return "newapi"
+	}
+	return "sub2api"
+}
+
+func validateTargetInput(in TargetInput, creating bool) error {
+	if strings.TrimSpace(in.Name) == "" {
+		return errors.New("target name is required")
+	}
+	if strings.TrimSpace(in.BaseURL) == "" {
+		return errors.New("target base_url is required")
+	}
+	parsed, err := url.ParseRequestURI(strings.TrimSpace(in.BaseURL))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return errors.New("target base_url must be an absolute HTTP URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return errors.New("target base_url must use HTTP or HTTPS")
+	}
+	if creating && strings.TrimSpace(in.AdminAPIKey) == "" {
+		return errors.New("target admin_api_key is required")
+	}
+	return nil
+}
+
+func (s *Service) requireSub2APITarget(targetID uint) error {
+	if targetID == 0 {
+		return errors.New("target_id is required")
+	}
+	target, err := s.targets.FindByID(targetID)
+	if err != nil {
+		return err
+	}
+	if normalizeTargetType(target.TargetType) != "sub2api" {
+		return errors.New("sync groups are only supported for Sub2API targets")
+	}
+	return nil
+}
+
+func (s *Service) newAPITargetCredential(targetID uint) (*storage.UpstreamSyncTarget, string, error) {
+	target, err := s.targets.FindByID(targetID)
+	if err != nil {
+		return nil, "", err
+	}
+	if normalizeTargetType(target.TargetType) != "newapi" {
+		return nil, "", errors.New("target is not a New API target")
+	}
+	apiKey, err := s.cipher.Decrypt(target.AdminAPIKeyCipher)
+	if err != nil {
+		return nil, "", err
+	}
+	if strings.TrimSpace(apiKey) == "" {
+		return nil, "", errors.New("New API root token is empty")
+	}
+	return target, apiKey, nil
+}
+
+func (s *Service) getNewAPIAutoGroups(ctx context.Context, baseURL, apiKey string) ([]string, error) {
+	settings, err := s.getNewAPIGroupSettings(ctx, baseURL, apiKey)
+	if err != nil {
+		return nil, err
+	}
+	return settings.AutoGroups, nil
+}
+
+type newAPIGroupSettings struct {
+	AutoGroups      []string
+	AvailableGroups []string
+}
+
+// getNewAPIGroupSettings reads AutoGroups along with the groups already
+// configured in New API's administrator settings. GroupRatio is the source of
+// routable groups; the other maps retain groups that operators have configured
+// elsewhere in the same settings page.
+func (s *Service) getNewAPIGroupSettings(ctx context.Context, baseURL, apiKey string) (*newAPIGroupSettings, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/api/option/", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("New API option request failed: %s", resp.Status)
+	}
+	var body struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+		Data    []struct {
+			Key   string `json:"key"`
+			Value string `json:"value"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&body); err != nil {
+		return nil, err
+	}
+	if !body.Success {
+		if body.Message == "" {
+			body.Message = "New API rejected option request"
+		}
+		return nil, errors.New(body.Message)
+	}
+	settings := &newAPIGroupSettings{}
+	availableSet := make(map[string]struct{})
+	for _, option := range body.Data {
+		switch option.Key {
+		case "AutoGroups":
+			var groups []string
+			if err := json.Unmarshal([]byte(option.Value), &groups); err != nil {
+				return nil, fmt.Errorf("decode New API AutoGroups: %w", err)
+			}
+			settings.AutoGroups = normalizeAutoGroups(groups)
+		case "GroupRatio", "UserUsableGroups", "TopupGroupRatio":
+			for _, group := range newAPIGroupNames(option.Value) {
+				availableSet[group] = struct{}{}
+			}
+		}
+	}
+	for _, group := range settings.AutoGroups {
+		availableSet[group] = struct{}{}
+	}
+	settings.AvailableGroups = sortedGroupNames(availableSet)
+	return settings, nil
+}
+
+func newAPIGroupNames(raw string) []string {
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+		return nil
+	}
+	groups := make([]string, 0, len(values))
+	for group := range values {
+		group = strings.TrimSpace(group)
+		if group != "" && !strings.EqualFold(group, "auto") {
+			groups = append(groups, group)
+		}
+	}
+	return groups
+}
+
+func sortedGroupNames(groups map[string]struct{}) []string {
+	result := make([]string, 0, len(groups))
+	for group := range groups {
+		if strings.EqualFold(group, "auto") {
+			continue
+		}
+		result = append(result, group)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return strings.ToLower(result[i]) < strings.ToLower(result[j])
+	})
+	return result
+}
+
+func (s *Service) putNewAPIAutoGroups(ctx context.Context, baseURL, apiKey string, groups []string) error {
+	value, err := json.Marshal(groups)
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(map[string]string{"key": "AutoGroups", "value": string(value)})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, strings.TrimRight(baseURL, "/")+"/api/option/", strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("New API AutoGroups update failed: %s", resp.Status)
+	}
+	var result struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
+		return err
+	}
+	if !result.Success {
+		if result.Message == "" {
+			result.Message = "New API rejected AutoGroups update"
+		}
+		return errors.New(result.Message)
+	}
+	return nil
+}
+
+func normalizeAutoGroups(groups []string) []string {
+	result := make([]string, 0, len(groups))
+	seen := make(map[string]struct{}, len(groups))
+	for _, group := range groups {
+		group = strings.TrimSpace(group)
+		if group == "" {
+			continue
+		}
+		if _, exists := seen[group]; exists {
+			continue
+		}
+		seen[group] = struct{}{}
+		result = append(result, group)
+	}
+	return result
+}
+
+func (s *Service) recordTargetCheck(targetID uint, checkErr error) {
+	status, errText := "ok", ""
+	if checkErr != nil {
+		status, errText = "failed", checkErr.Error()
+	}
+	now := time.Now()
+	_ = s.targets.UpdateCheck(targetID, status, &now, errText)
 }
 
 func (s *Service) ListTargetGroups(targetID uint, includeMissing bool) ([]TargetGroupDTO, error) {
@@ -439,6 +726,9 @@ func (s *Service) ListSyncGroups() ([]SyncGroupDTO, error) {
 }
 
 func (s *Service) CreateSyncGroup(in SyncGroupDTO) (*SyncGroupDTO, error) {
+	if err := s.requireSub2APITarget(in.TargetID); err != nil {
+		return nil, err
+	}
 	accounts := accountItems(in.Accounts)
 	if err := s.validateGatewaySyncAccounts(accounts); err != nil {
 		return nil, err
@@ -504,6 +794,9 @@ func (s *Service) CreateSyncGroup(in SyncGroupDTO) (*SyncGroupDTO, error) {
 func (s *Service) UpdateSyncGroup(id uint, in SyncGroupDTO) (*SyncGroupDTO, error) {
 	item, err := s.syncGroups.FindByID(id)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.requireSub2APITarget(in.TargetID); err != nil {
 		return nil, err
 	}
 	accounts := accountItems(in.Accounts)
@@ -2768,6 +3061,7 @@ func (s *Service) toTargetDTO(item *storage.UpstreamSyncTarget) *TargetDTO {
 	return &TargetDTO{
 		ID:              item.ID,
 		Name:            item.Name,
+		TargetType:      normalizeTargetType(item.TargetType),
 		BaseURL:         item.BaseURL,
 		Enabled:         item.Enabled,
 		LastCheckStatus: item.LastCheckStatus,

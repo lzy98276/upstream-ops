@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/lzy98276/upstream-ops/backend/syncer"
 	"github.com/gin-gonic/gin"
+	"github.com/lzy98276/upstream-ops/backend/syncer"
 )
 
 func registerUpstreamSync(g *gin.RouterGroup, d *Deps) {
@@ -19,6 +19,8 @@ func registerUpstreamSync(g *gin.RouterGroup, d *Deps) {
 	gp.PUT("/targets/:id", func(c *gin.Context) { updateUpstreamSyncTarget(c, d) })
 	gp.DELETE("/targets/:id", func(c *gin.Context) { deleteUpstreamSyncTarget(c, d) })
 	gp.POST("/targets/:id/check", func(c *gin.Context) { checkUpstreamSyncTarget(c, d) })
+	gp.GET("/targets/:id/newapi/auto-groups", func(c *gin.Context) { getNewAPIAutoGroups(c, d) })
+	gp.PUT("/targets/:id/newapi/auto-groups", func(c *gin.Context) { updateNewAPIAutoGroups(c, d) })
 	gp.POST("/targets/:id/groups/sync", func(c *gin.Context) { syncUpstreamSyncTargetGroups(c, d) })
 	gp.GET("/targets/:id/groups", func(c *gin.Context) { listUpstreamSyncTargetGroups(c, d) })
 	gp.GET("/targets/:id/proxies", func(c *gin.Context) { listUpstreamSyncTargetProxies(c, d) })
@@ -98,6 +100,41 @@ func checkUpstreamSyncTarget(c *gin.Context, d *Deps) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func getNewAPIAutoGroups(c *gin.Context, d *Deps) {
+	id, err := uintParam(c, "id")
+	if err != nil {
+		fail(c, http.StatusBadRequest, err)
+		return
+	}
+	item, err := d.UpstreamSync.GetNewAPIAutoGroups(c.Request.Context(), id)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": item})
+}
+
+func updateNewAPIAutoGroups(c *gin.Context, d *Deps) {
+	id, err := uintParam(c, "id")
+	if err != nil {
+		fail(c, http.StatusBadRequest, err)
+		return
+	}
+	var in struct {
+		Groups []string `json:"groups"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		fail(c, http.StatusBadRequest, err)
+		return
+	}
+	item, err := d.UpstreamSync.UpdateNewAPIAutoGroups(c.Request.Context(), id, in.Groups)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": item})
 }
 
 func syncUpstreamSyncTargetGroups(c *gin.Context, d *Deps) {

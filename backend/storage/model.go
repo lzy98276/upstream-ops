@@ -305,6 +305,7 @@ func (MonitorLog) TableName() string { return "monitor_logs" }
 type UpstreamSyncTarget struct {
 	ID                uint       `gorm:"primaryKey" json:"id"`
 	Name              string     `gorm:"size:128;not null;uniqueIndex" json:"name"`
+	TargetType        string     `gorm:"size:32;not null;default:'sub2api';index" json:"target_type"`
 	BaseURL           string     `gorm:"size:512;not null" json:"base_url"`
 	AdminAPIKeyCipher string     `gorm:"type:text;not null" json:"-"`
 	Enabled           bool       `gorm:"default:true" json:"enabled"`

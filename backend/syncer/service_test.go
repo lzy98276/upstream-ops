@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -2451,5 +2452,84 @@ func TestAccountItemsSkipsBlankChannelRows(t *testing.T) {
 	}
 	if items[0].SourceChannelID != 7 || items[0].Position != 0 {
 		t.Fatalf("stored account = %#v", items[0])
+	}
+}
+
+func TestNewAPIAutoGroupsRoundTripPreservesOrder(t *testing.T) {
+	var savedValue string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/option/", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer root-token" {
+			t.Fatalf("authorization = %q", got)
+		}
+		switch r.Method {
+		case http.MethodGet:
+			respondJSON(w, map[string]any{
+				"success": true,
+				"data": []map[string]string{
+					{"key": "AutoGroups", "value": `["vip","default","premium"]`},
+					{"key": "GroupRatio", "value": `{"default":1,"vip":2,"shared":0.9,"auto":1}`},
+					{"key": "UserUsableGroups", "value": `{"premium":"Premium","limited":"Limited"}`},
+					{"key": "TopupGroupRatio", "value": `{"topup-only":1}`},
+				},
+			})
+		case http.MethodPut:
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode update: %v", err)
+			}
+			if body["key"] != "AutoGroups" {
+				t.Fatalf("key = %q", body["key"])
+			}
+			savedValue = body["value"]
+			respondJSON(w, map[string]any{"success": true})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	db := openSyncerTestDB(t)
+	svc := newTestService(t, db, &fakeChannelService{})
+	target, err := svc.CreateTarget(context.Background(), TargetInput{
+		Name: "newapi", TargetType: "newapi", BaseURL: server.URL, AdminAPIKey: "root-token", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	got, err := svc.GetNewAPIAutoGroups(context.Background(), target.ID)
+	if err != nil {
+		t.Fatalf("get auto groups: %v", err)
+	}
+	if !reflect.DeepEqual(got.Groups, []string{"vip", "default", "premium"}) {
+		t.Fatalf("groups = %#v", got.Groups)
+	}
+	if !reflect.DeepEqual(got.AvailableGroups, []string{"default", "limited", "premium", "shared", "topup-only", "vip"}) {
+		t.Fatalf("available groups = %#v", got.AvailableGroups)
+	}
+	updated, err := svc.UpdateNewAPIAutoGroups(context.Background(), target.ID, []string{"premium", "vip", "premium", ""})
+	if err != nil {
+		t.Fatalf("update auto groups: %v", err)
+	}
+	if !reflect.DeepEqual(updated.Groups, []string{"premium", "vip"}) {
+		t.Fatalf("updated groups = %#v", updated.Groups)
+	}
+	if savedValue != `["premium","vip"]` {
+		t.Fatalf("saved value = %q", savedValue)
+	}
+}
+
+func TestNewAPITargetCannotCreateSub2APISyncGroup(t *testing.T) {
+	db := openSyncerTestDB(t)
+	svc := newTestService(t, db, &fakeChannelService{})
+	target, err := svc.CreateTarget(context.Background(), TargetInput{
+		Name: "newapi", TargetType: "newapi", BaseURL: "https://newapi.example", AdminAPIKey: "root-token", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	if _, err := svc.CreateSyncGroup(SyncGroupDTO{TargetID: target.ID}); err == nil {
+		t.Fatal("expected New API target to be rejected for Sub2API sync group")
 	}
 }
