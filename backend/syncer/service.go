@@ -9,6 +9,7 @@ import (
 	"hash/fnv"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"sort"
@@ -3918,7 +3919,19 @@ func clampGatewayRate(value, minValue, maxValue float64) float64 {
 	if maxValue > 0 && value > maxValue {
 		value = maxValue
 	}
-	return value
+	return roundGatewayRate(value)
+}
+
+const gatewayRateDecimalPlaces = 8
+
+// roundGatewayRate removes binary floating-point tails before a calculated
+// multiplier is compared, logged, cached, or sent to an upstream target.
+func roundGatewayRate(value float64) float64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return value
+	}
+	scale := math.Pow10(gatewayRateDecimalPlaces)
+	return math.Round(value*scale) / scale
 }
 
 func nonNegativeFloat(value float64) float64 {

@@ -3187,6 +3187,13 @@ func TestNewAPIApplySyncGroupCreatesUpdatesAndDeletesChannel(t *testing.T) {
 	}
 }
 
+func TestGatewayRateMultiplierRoundsBinaryFloatingPointTails(t *testing.T) {
+	got := clampGatewayRate(applyGatewayRateOperation(0.1, "add", 0.02), 0, 0)
+	if got != 0.12 {
+		t.Fatalf("gateway rate = %.17g, want 0.12", got)
+	}
+}
+
 func TestNewAPIGatewaySyncUpdatesGroupRatioAndCreatesChannel(t *testing.T) {
 	options := map[string]string{
 		"AutoGroups":       `[]`,

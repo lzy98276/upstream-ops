@@ -3881,10 +3881,11 @@ function applyGatewayRateOperation(
 function clampGatewayRate(value: number, minValue: number, maxValue: number) {
   const min = Math.max(0, minValue || 0);
   const max = Math.max(0, maxValue || 0);
-  return Math.min(
+  const clamped = Math.min(
     max > 0 ? max : Number.POSITIVE_INFINITY,
     Math.max(min, value),
   );
+  return Number.isFinite(clamped) ? Number(clamped.toFixed(8)) : clamped;
 }
 
 function Panel({
