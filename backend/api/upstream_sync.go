@@ -21,8 +21,13 @@ func registerUpstreamSync(g *gin.RouterGroup, d *Deps) {
 	gp.POST("/targets/:id/check", func(c *gin.Context) { checkUpstreamSyncTarget(c, d) })
 	gp.GET("/targets/:id/newapi/auto-groups", func(c *gin.Context) { getNewAPIAutoGroups(c, d) })
 	gp.PUT("/targets/:id/newapi/auto-groups", func(c *gin.Context) { updateNewAPIAutoGroups(c, d) })
+	gp.GET("/targets/:id/newapi/groups", func(c *gin.Context) { listNewAPIGroups(c, d) })
+	gp.POST("/targets/:id/newapi/groups", func(c *gin.Context) { saveNewAPIGroup(c, d) })
+	gp.PUT("/targets/:id/newapi/groups/:name", func(c *gin.Context) { updateNewAPIGroup(c, d) })
+	gp.DELETE("/targets/:id/newapi/groups/:name", func(c *gin.Context) { deleteNewAPIGroup(c, d) })
 	gp.POST("/targets/:id/groups/sync", func(c *gin.Context) { syncUpstreamSyncTargetGroups(c, d) })
 	gp.GET("/targets/:id/groups", func(c *gin.Context) { listUpstreamSyncTargetGroups(c, d) })
+	gp.PUT("/targets/:id/groups/sort-order", func(c *gin.Context) { reorderUpstreamSyncTargetGroups(c, d) })
 	gp.GET("/targets/:id/proxies", func(c *gin.Context) { listUpstreamSyncTargetProxies(c, d) })
 	gp.GET("/source-models", func(c *gin.Context) { listUpstreamSyncSourceModels(c, d) })
 	gp.GET("/sync-groups", func(c *gin.Context) { listUpstreamSyncGroups(c, d) })
@@ -137,6 +142,72 @@ func updateNewAPIAutoGroups(c *gin.Context, d *Deps) {
 	c.JSON(http.StatusOK, gin.H{"data": item})
 }
 
+func listNewAPIGroups(c *gin.Context, d *Deps) {
+	id, err := uintParam(c, "id")
+	if err != nil {
+		fail(c, http.StatusBadRequest, err)
+		return
+	}
+	list, err := d.UpstreamSync.ListNewAPIGroups(c.Request.Context(), id)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": list})
+}
+
+func saveNewAPIGroup(c *gin.Context, d *Deps) {
+	id, err := uintParam(c, "id")
+	if err != nil {
+		fail(c, http.StatusBadRequest, err)
+		return
+	}
+	var in syncer.NewAPIGroupInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		fail(c, http.StatusBadRequest, err)
+		return
+	}
+	item, err := d.UpstreamSync.SaveNewAPIGroup(c.Request.Context(), id, in)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": item})
+}
+
+func updateNewAPIGroup(c *gin.Context, d *Deps) {
+	id, err := uintParam(c, "id")
+	if err != nil {
+		fail(c, http.StatusBadRequest, err)
+		return
+	}
+	var in syncer.NewAPIGroupInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		fail(c, http.StatusBadRequest, err)
+		return
+	}
+	in.Name = c.Param("name")
+	item, err := d.UpstreamSync.SaveNewAPIGroup(c.Request.Context(), id, in)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": item})
+}
+
+func deleteNewAPIGroup(c *gin.Context, d *Deps) {
+	id, err := uintParam(c, "id")
+	if err != nil {
+		fail(c, http.StatusBadRequest, err)
+		return
+	}
+	if err := d.UpstreamSync.DeleteNewAPIGroup(c.Request.Context(), id, c.Param("name")); err != nil {
+		fail(c, http.StatusInternalServerError, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 func syncUpstreamSyncTargetGroups(c *gin.Context, d *Deps) {
 	id, err := uintParam(c, "id")
 	if err != nil {
@@ -159,6 +230,27 @@ func listUpstreamSyncTargetGroups(c *gin.Context, d *Deps) {
 	}
 	includeMissing := c.Query("include_missing") == "1" || c.Query("include_missing") == "true"
 	list, err := d.UpstreamSync.ListTargetGroups(id, includeMissing)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": list})
+}
+
+func reorderUpstreamSyncTargetGroups(c *gin.Context, d *Deps) {
+	id, err := uintParam(c, "id")
+	if err != nil {
+		fail(c, http.StatusBadRequest, err)
+		return
+	}
+	var in struct {
+		OrderedIDs []int64 `json:"ordered_ids"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		fail(c, http.StatusBadRequest, err)
+		return
+	}
+	list, err := d.UpstreamSync.ReorderSub2APIGroups(c.Request.Context(), id, in.OrderedIDs)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, err)
 		return

@@ -222,3 +222,36 @@ func TestAdminClientUsesAPIKeyAndDecodesAccountWrites(t *testing.T) {
 		t.Fatalf("DeleteGroup: %v", err)
 	}
 }
+
+func TestAdminClientUpdatesGroupSortOrders(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/admin/groups/sort-order", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Fatalf("method = %s, want PUT", r.Method)
+		}
+		if r.Header.Get("x-api-key") != "admin-key" {
+			t.Fatalf("x-api-key = %q", r.Header.Get("x-api-key"))
+		}
+		var body struct {
+			Updates []struct {
+				ID        int64 `json:"id"`
+				SortOrder int   `json:"sort_order"`
+			} `json:"updates"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode sort body: %v", err)
+		}
+		if len(body.Updates) != 2 || body.Updates[0].ID != 102 || body.Updates[0].SortOrder != 1 || body.Updates[1].ID != 101 || body.Updates[1].SortOrder != 2 {
+			t.Fatalf("updates = %#v", body.Updates)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "message": ""})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := NewAdminClient()
+	err := client.UpdateGroupSortOrders(context.Background(), AdminTarget{BaseURL: server.URL, APIKey: "admin-key"}, []int64{102, 101})
+	if err != nil {
+		t.Fatalf("UpdateGroupSortOrders: %v", err)
+	}
+}

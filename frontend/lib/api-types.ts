@@ -1017,6 +1017,12 @@ export interface NewAPIAutoGroups {
   available_groups: string[];
 }
 
+export interface NewAPIGroup {
+  name: string;
+  ratio: number;
+  description?: string;
+}
+
 /** 自定义 LiteLLM 价格源，较高 priority 覆盖较低 priority 与官方目录。 */
 export interface ModelPriceSource {
   id: number;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   Check,
@@ -6,6 +6,7 @@ import {
   ChevronsUpDown,
   ChevronDown,
   ChevronUp,
+  GripVertical,
   HelpCircle,
   ListTree,
   MoreHorizontal,
@@ -80,6 +81,7 @@ import type {
   GatewayGroup,
   GatewayRoute,
   NewAPIAutoGroups,
+  NewAPIGroup,
   RateSnapshot,
   UpstreamSyncLog,
   UpstreamSyncLogPage,
@@ -100,6 +102,12 @@ interface TargetForm {
 }
 
 type NewAPITargetForm = TargetForm;
+
+interface NewAPIGroupForm {
+  name: string;
+  ratio: string;
+  description: string;
+}
 
 interface SyncGroupForm {
   id?: number;
@@ -151,6 +159,12 @@ const emptyTargetForm: TargetForm = {
 
 const emptyNewAPITargetForm: NewAPITargetForm = {
   ...emptyTargetForm,
+};
+
+const emptyNewAPIGroupForm: NewAPIGroupForm = {
+  name: "",
+  ratio: "1",
+  description: "",
 };
 
 const emptySyncGroupForm: SyncGroupForm = {
@@ -528,9 +542,21 @@ export function UpstreamSyncSettings() {
   const [autoGroupsDialogTarget, setAutoGroupsDialogTarget] =
     useState<UpstreamSyncTarget | null>(null);
   const [autoGroups, setAutoGroups] = useState<string[]>([]);
+  const [autoGroupDragOver, setAutoGroupDragOver] = useState<string | null>(
+    null,
+  );
   const [availableAutoGroups, setAvailableAutoGroups] = useState<string[]>([]);
   const [newAutoGroup, setNewAutoGroup] = useState("");
   const [autoGroupsLoading, setAutoGroupsLoading] = useState(false);
+  const [newAPIGroupsDialogTarget, setNewAPIGroupsDialogTarget] =
+    useState<UpstreamSyncTarget | null>(null);
+  const [newAPIGroups, setNewAPIGroups] = useState<NewAPIGroup[]>([]);
+  const [newAPIGroupsLoading, setNewAPIGroupsLoading] = useState(false);
+  const [newAPIGroupForm, setNewAPIGroupForm] =
+    useState<NewAPIGroupForm>(emptyNewAPIGroupForm);
+  const [editingNewAPIGroupName, setEditingNewAPIGroupName] = useState<
+    string | null
+  >(null);
   const [syncGroupForm, setSyncGroupForm] =
     useState<SyncGroupForm>(emptySyncGroupForm);
   const [selectedTargetID, setSelectedTargetID] = useState<number | null>(null);
@@ -756,6 +782,7 @@ export function UpstreamSyncSettings() {
     async (target: UpstreamSyncTarget) => {
       setAutoGroupsDialogTarget(target);
       setAutoGroups([]);
+      setAutoGroupDragOver(null);
       setAvailableAutoGroups([]);
       setNewAutoGroup("");
       setAutoGroupsLoading(true);
@@ -774,6 +801,116 @@ export function UpstreamSyncSettings() {
     },
     [],
   );
+
+  const openNewAPIGroupsDialog = useCallback(
+    async (target: UpstreamSyncTarget, announceSync = false) => {
+      setNewAPIGroupsDialogTarget(target);
+      setNewAPIGroups([]);
+      setNewAPIGroupForm(emptyNewAPIGroupForm);
+      setEditingNewAPIGroupName(null);
+      setNewAPIGroupsLoading(true);
+      try {
+        const result = await apiFetch<NewAPIGroup[]>(
+          `/upstream-sync/targets/${target.id}/newapi/groups`,
+        );
+        setNewAPIGroups(result ?? []);
+        if (announceSync) {
+          toast.success(`${target.name} 分组已同步`);
+        }
+      } catch (err) {
+        setNewAPIGroupsDialogTarget(null);
+        toast.error(err instanceof Error ? err.message : "加载 New API 分组失败");
+      } finally {
+        setNewAPIGroupsLoading(false);
+      }
+    },
+    [],
+  );
+
+  function editNewAPIGroup(group: NewAPIGroup) {
+    setEditingNewAPIGroupName(group.name);
+    setNewAPIGroupForm({
+      name: group.name,
+      ratio: String(group.ratio),
+      description: group.description ?? "",
+    });
+  }
+
+  function resetNewAPIGroupForm() {
+    setEditingNewAPIGroupName(null);
+    setNewAPIGroupForm(emptyNewAPIGroupForm);
+  }
+
+  async function saveNewAPIGroup() {
+    if (!newAPIGroupsDialogTarget) return;
+    const name = newAPIGroupForm.name.trim();
+    const ratio = decimalNumber(newAPIGroupForm.ratio, Number.NaN);
+    if (!name) {
+      toast.error("请填写分组名称");
+      return;
+    }
+    if (!Number.isFinite(ratio) || ratio < 0) {
+      toast.error("倍率必须是大于或等于 0 的数字");
+      return;
+    }
+    const originalName = editingNewAPIGroupName;
+    if (originalName && originalName !== name) {
+      toast.error("New API 不支持重命名分组，请新建后删除旧分组");
+      return;
+    }
+    setBusy(`newapi-group-${newAPIGroupsDialogTarget.id}`);
+    try {
+      const path = originalName
+        ? `/upstream-sync/targets/${newAPIGroupsDialogTarget.id}/newapi/groups/${encodeURIComponent(originalName)}`
+        : `/upstream-sync/targets/${newAPIGroupsDialogTarget.id}/newapi/groups`;
+      const saved = await apiFetch<NewAPIGroup>(path, {
+        method: originalName ? "PUT" : "POST",
+        body: JSON.stringify({
+          name,
+          ratio,
+          description: newAPIGroupForm.description.trim(),
+        }),
+      });
+      setNewAPIGroups((groups) => {
+        const next = groups.filter((group) => group.name !== saved.name);
+        next.push(saved);
+        return next.sort((left, right) => left.name.localeCompare(right.name));
+      });
+      resetNewAPIGroupForm();
+      toast.success(originalName ? "New API 分组已更新" : "New API 分组已创建");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "保存 New API 分组失败");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function deleteNewAPIGroup(group: NewAPIGroup) {
+    if (!newAPIGroupsDialogTarget) return;
+    const ok = await confirm({
+      title: `删除 New API 分组 ${group.name}？`,
+      description: "将删除该分组的倍率和说明，并从自动分组顺序中移除。",
+      confirmLabel: "删除分组",
+      destructive: true,
+    });
+    if (!ok) return;
+    setBusy(`newapi-group-${newAPIGroupsDialogTarget.id}`);
+    try {
+      await apiFetch(
+        `/upstream-sync/targets/${newAPIGroupsDialogTarget.id}/newapi/groups/${encodeURIComponent(group.name)}`,
+        { method: "DELETE" },
+      );
+      setNewAPIGroups((groups) =>
+        groups.filter((item) => item.name !== group.name),
+      );
+      if (editingNewAPIGroupName === group.name) resetNewAPIGroupForm();
+      toast.success("New API 分组已删除");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "删除 New API 分组失败");
+    } finally {
+      setBusy(null);
+    }
+  }
 
   async function saveAutoGroups() {
     if (!autoGroupsDialogTarget) return;
@@ -810,6 +947,19 @@ export function UpstreamSyncSettings() {
       if (nextIndex < 0 || nextIndex >= groups.length) return groups;
       const next = [...groups];
       [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+      return next;
+    });
+  }
+
+  function moveAutoGroupByName(fromGroup: string, toGroup: string) {
+    if (fromGroup === toGroup) return;
+    setAutoGroups((groups) => {
+      const fromIndex = groups.indexOf(fromGroup);
+      const toIndex = groups.indexOf(toGroup);
+      if (fromIndex < 0 || toIndex < 0) return groups;
+      const next = [...groups];
+      const [item] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, item);
       return next;
     });
   }
@@ -875,6 +1025,30 @@ export function UpstreamSyncSettings() {
       toast.success(`${target.name} 分组已同步`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "同步分组失败");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function reorderTargetGroups(
+    target: UpstreamSyncTarget,
+    orderedGroups: UpstreamSyncTargetGroup[],
+  ) {
+    const orderedIDs = orderedGroups.map((group) => group.remote_group_id);
+    setBusy(`group-order-${target.id}`);
+    try {
+      const result = await apiFetch<UpstreamSyncTargetGroup[]>(
+        `/upstream-sync/targets/${target.id}/groups/sort-order`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ ordered_ids: orderedIDs }),
+        },
+      );
+      setTargetGroups(result);
+      toast.success(`${target.name} 上游分组排序已更新`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "更新上游分组排序失败");
+      await loadTargetGroups(target.id);
     } finally {
       setBusy(null);
     }
@@ -1260,6 +1434,14 @@ export function UpstreamSyncSettings() {
                   </div>
                   {isGroupOpen ? (
                     <div className="mt-4 border-t border-border pt-4">
+                      <TargetGroupOrderList
+                        target={target}
+                        groups={targetGroups}
+                        busy={busy === `group-order-${target.id}`}
+                        onReorder={(groups) =>
+                          void reorderTargetGroups(target, groups)
+                        }
+                      />
                       <SyncGroupList
                         syncGroups={targetSyncGroups}
                         busy={busy}
@@ -1285,7 +1467,7 @@ export function UpstreamSyncSettings() {
 
       <Panel
         title="New API 上游列表"
-        description="用于管理 New API 管理员设置中的自动分组顺序。该列表不会进入 Sub2API 的账号托管同步流程。"
+        description="管理 New API 管理员设置中的分组、倍率与自动分组顺序；该列表不会进入 Sub2API 的账号托管同步流程。"
         action={
           <Button
             size="sm"
@@ -1339,6 +1521,27 @@ export function UpstreamSyncSettings() {
                     </p>
                   </div>
                   <div className="flex w-full items-center gap-2 xl:w-auto xl:justify-end">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 flex-1 px-3 xl:flex-none"
+                      onClick={() => void openNewAPIGroupsDialog(target)}
+                    >
+                      <ListTree className="size-3.5" />
+                      分组管理
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 px-3"
+                      onClick={() =>
+                        void openNewAPIGroupsDialog(target, true)
+                      }
+                      disabled={newAPIGroupsLoading}
+                    >
+                      <RefreshCw className="size-3.5" />
+                      同步分组
+                    </Button>
                     <Button
                       size="sm"
                       variant="outline"
@@ -1681,6 +1884,7 @@ export function UpstreamSyncSettings() {
           if (!open) {
             setAutoGroupsDialogTarget(null);
             setAutoGroups([]);
+            setAutoGroupDragOver(null);
             setAvailableAutoGroups([]);
             setNewAutoGroup("");
           }
@@ -1762,8 +1966,46 @@ export function UpstreamSyncSettings() {
                 autoGroups.map((group, index) => (
                   <div
                     key={group}
-                    className="flex items-center gap-2 rounded-md border bg-background px-2 py-1.5"
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = "move";
+                      setAutoGroupDragOver(group);
+                    }}
+                    onDragLeave={() => {
+                      if (autoGroupDragOver === group)
+                        setAutoGroupDragOver(null);
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      const fromGroup =
+                        event.dataTransfer.getData("text/plain");
+                      setAutoGroupDragOver(null);
+                      if (fromGroup) moveAutoGroupByName(fromGroup, group);
+                    }}
+                    className={cn(
+                      "flex items-center gap-2 rounded-md border bg-background px-2 py-1.5",
+                      autoGroupDragOver === group &&
+                        "border-primary/60 ring-1 ring-primary/25",
+                    )}
                   >
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      className="size-7 shrink-0 cursor-grab touch-none active:cursor-grabbing"
+                      title="拖动调整优先级"
+                      draggable={!autoGroupsLoading}
+                      disabled={autoGroupsLoading || autoGroups.length < 2}
+                      onDragStart={(event) => {
+                        event.stopPropagation();
+                        event.dataTransfer.effectAllowed = "move";
+                        event.dataTransfer.setData("text/plain", group);
+                      }}
+                      onDragEnd={() => setAutoGroupDragOver(null)}
+                    >
+                      <GripVertical className="size-4 text-muted-foreground" />
+                      <span className="sr-only">拖动调整优先级</span>
+                    </Button>
                     <span className="w-6 text-center text-xs tabular-nums text-muted-foreground">
                       {index + 1}
                     </span>
@@ -1832,8 +2074,287 @@ export function UpstreamSyncSettings() {
         </DialogContent>
       </Dialog>
 
+      <Dialog
+        open={newAPIGroupsDialogTarget != null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setNewAPIGroupsDialogTarget(null);
+            setNewAPIGroups([]);
+            resetNewAPIGroupForm();
+          }
+        }}
+      >
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>New API 分组管理</DialogTitle>
+            <DialogDescription>
+              {newAPIGroupsDialogTarget
+                ? `管理 ${newAPIGroupsDialogTarget.name} 的分组倍率和说明。创建后可在自动分组中设置优先级。`
+                : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid gap-3 rounded-lg border border-border bg-muted/15 p-3 sm:grid-cols-[minmax(0,1fr)_120px_minmax(0,1fr)_auto] sm:items-end">
+              <Field label="分组名称">
+                <Input
+                  value={newAPIGroupForm.name}
+                  placeholder="例如 premium"
+                  disabled={newAPIGroupsLoading || editingNewAPIGroupName != null}
+                  onChange={(event) =>
+                    setNewAPIGroupForm((form) => ({
+                      ...form,
+                      name: event.target.value,
+                    }))
+                  }
+                />
+              </Field>
+              <Field label="倍率">
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={newAPIGroupForm.ratio}
+                  disabled={newAPIGroupsLoading}
+                  onChange={(event) =>
+                    setNewAPIGroupForm((form) => ({
+                      ...form,
+                      ratio: event.target.value,
+                    }))
+                  }
+                />
+              </Field>
+              <Field label="说明">
+                <Input
+                  value={newAPIGroupForm.description}
+                  placeholder="可选"
+                  disabled={newAPIGroupsLoading}
+                  onChange={(event) =>
+                    setNewAPIGroupForm((form) => ({
+                      ...form,
+                      description: event.target.value,
+                    }))
+                  }
+                />
+              </Field>
+              <div className="flex gap-2">
+                {editingNewAPIGroupName ? (
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="outline"
+                    title="取消编辑"
+                    onClick={resetNewAPIGroupForm}
+                    disabled={newAPIGroupsLoading}
+                  >
+                    <XCircle className="size-4" />
+                    <span className="sr-only">取消编辑</span>
+                  </Button>
+                ) : null}
+                <Button
+                  type="button"
+                  onClick={() => void saveNewAPIGroup()}
+                  disabled={
+                    newAPIGroupsLoading ||
+                    (newAPIGroupsDialogTarget != null &&
+                      busy === `newapi-group-${newAPIGroupsDialogTarget.id}`)
+                  }
+                >
+                  <Plus className="size-4" />
+                  {editingNewAPIGroupName ? "保存" : "创建"}
+                </Button>
+              </div>
+            </div>
+            {newAPIGroupsLoading ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">
+                加载中...
+              </p>
+            ) : newAPIGroups.length === 0 ? (
+              <EmptyBox text="还没有配置 New API 分组。" />
+            ) : (
+              <div className="overflow-hidden rounded-lg border border-border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>分组</TableHead>
+                      <TableHead>倍率</TableHead>
+                      <TableHead>说明</TableHead>
+                      <TableHead className="w-24 text-right">操作</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {newAPIGroups.map((group) => (
+                      <TableRow key={group.name}>
+                        <TableCell className="font-medium">{group.name}</TableCell>
+                        <TableCell className="tabular-nums">
+                          {formatRatio(group.ratio)}
+                        </TableCell>
+                        <TableCell className="max-w-56 truncate text-muted-foreground">
+                          {group.description || "-"}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex justify-end gap-1">
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              title="编辑分组"
+                              disabled={newAPIGroupsLoading}
+                              onClick={() => editNewAPIGroup(group)}
+                            >
+                              <PencilLine className="size-4" />
+                              <span className="sr-only">编辑分组</span>
+                            </Button>
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              className="text-destructive hover:text-destructive"
+                              title="删除分组"
+                              disabled={newAPIGroupsLoading}
+                              onClick={() => void deleteNewAPIGroup(group)}
+                            >
+                              <Trash2 className="size-4" />
+                              <span className="sr-only">删除分组</span>
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setNewAPIGroupsDialogTarget(null)}
+            >
+              关闭
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {dialog}
     </div>
+  );
+}
+
+function TargetGroupOrderList({
+  target,
+  groups,
+  busy,
+  onReorder,
+}: {
+  target: UpstreamSyncTarget;
+  groups: UpstreamSyncTargetGroup[];
+  busy: boolean;
+  onReorder: (groups: UpstreamSyncTargetGroup[]) => void;
+}) {
+  const dragIDRef = useRef<number | null>(null);
+  const [draggingID, setDraggingID] = useState<number | null>(null);
+  const [dragOverID, setDragOverID] = useState<number | null>(null);
+
+  function moveGroup(fromID: number, toID: number) {
+    if (fromID === toID) return;
+    const fromIndex = groups.findIndex((group) => group.id === fromID);
+    const toIndex = groups.findIndex((group) => group.id === toID);
+    if (fromIndex < 0 || toIndex < 0) return;
+    const next = [...groups];
+    const [item] = next.splice(fromIndex, 1);
+    next.splice(toIndex, 0, item);
+    onReorder(next);
+  }
+
+  return (
+    <section className="mb-4 space-y-3 rounded-lg border border-border bg-muted/15 p-3">
+      <div className="space-y-1">
+        <p className="text-sm font-semibold text-foreground">上游分组排序</p>
+        <p className="text-xs text-muted-foreground">
+          拖动手柄调整 {target.name} 的远端分组排序顺序。
+        </p>
+      </div>
+      {groups.length === 0 ? (
+        <p className="py-3 text-center text-sm text-muted-foreground">
+          请先同步上游分组。
+        </p>
+      ) : (
+        <div className="max-h-64 space-y-1.5 overflow-y-auto">
+          {groups.map((group, index) => {
+            const isDragging = draggingID === group.id;
+            const isDragOver =
+              dragOverID === group.id && draggingID !== group.id;
+            return (
+              <div
+                key={group.id}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = "move";
+                  if (dragOverID !== group.id) setDragOverID(group.id);
+                }}
+                onDragLeave={() => {
+                  if (dragOverID === group.id) setDragOverID(null);
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  const raw = event.dataTransfer.getData("text/plain");
+                  const fromID = dragIDRef.current ?? Number(raw);
+                  dragIDRef.current = null;
+                  setDraggingID(null);
+                  setDragOverID(null);
+                  if (Number.isFinite(fromID) && fromID > 0) {
+                    moveGroup(fromID, group.id);
+                  }
+                }}
+                className={cn(
+                  "flex min-w-0 items-center gap-2 rounded-md border bg-background px-2 py-1.5 transition-colors",
+                  isDragging && "opacity-50",
+                  isDragOver && "border-primary/60 ring-1 ring-primary/25",
+                )}
+              >
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="size-7 shrink-0 cursor-grab touch-none active:cursor-grabbing"
+                  title="拖动调整排序"
+                  draggable={!busy}
+                  disabled={busy || groups.length < 2}
+                  onDragStart={(event) => {
+                    event.stopPropagation();
+                    dragIDRef.current = group.id;
+                    setDraggingID(group.id);
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("text/plain", String(group.id));
+                  }}
+                  onDragEnd={() => {
+                    dragIDRef.current = null;
+                    setDraggingID(null);
+                    setDragOverID(null);
+                  }}
+                >
+                  <GripVertical className="size-4 text-muted-foreground" />
+                  <span className="sr-only">拖动调整排序</span>
+                </Button>
+                <span className="w-6 text-center text-xs tabular-nums text-muted-foreground">
+                  {index + 1}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                  {group.name}
+                </span>
+                <Badge variant="outline" className="shrink-0 font-normal">
+                  {group.platform || "openai"}
+                </Badge>
+                <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                  {formatRatio(group.ratio)}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }
 

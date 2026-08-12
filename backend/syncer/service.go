@@ -226,6 +226,18 @@ type NewAPIAutoGroupsDTO struct {
 	AvailableGroups []string `json:"available_groups"`
 }
 
+type NewAPIGroupDTO struct {
+	Name        string  `json:"name"`
+	Ratio       float64 `json:"ratio"`
+	Description string  `json:"description,omitempty"`
+}
+
+type NewAPIGroupInput struct {
+	Name        string  `json:"name"`
+	Ratio       float64 `json:"ratio"`
+	Description string  `json:"description"`
+}
+
 func (s *Service) ListTargets() ([]TargetDTO, error) {
 	list, err := s.targets.List()
 	if err != nil {
@@ -375,6 +387,78 @@ func (s *Service) SyncTargetGroups(ctx context.Context, targetID uint) ([]Target
 	return out, nil
 }
 
+// ReorderSub2APIGroups updates the remote Sub2API group sort order and returns
+// the refreshed local cache in the same order.
+func (s *Service) ReorderSub2APIGroups(ctx context.Context, targetID uint, orderedIDs []int64) ([]TargetGroupDTO, error) {
+	target, err := s.targets.FindByID(targetID)
+	if err != nil {
+		return nil, err
+	}
+	if normalizeTargetType(target.TargetType) != "sub2api" {
+		return nil, errors.New("group ordering is only supported for Sub2API targets")
+	}
+	plain, err := s.cipher.Decrypt(target.AdminAPIKeyCipher)
+	if err != nil {
+		return nil, err
+	}
+	orderedIDs = compactPositiveIDs(orderedIDs)
+	client := sub2api.NewAdminClient()
+	remoteGroups, err := client.ListGroups(ctx, sub2api.AdminTarget{BaseURL: target.BaseURL, APIKey: plain}, true)
+	if err != nil {
+		s.recordTargetCheck(targetID, err)
+		return nil, err
+	}
+	remoteIDs := make([]int64, 0, len(remoteGroups))
+	for _, group := range remoteGroups {
+		remoteIDs = append(remoteIDs, group.ID)
+	}
+	if !samePositiveIDSet(orderedIDs, remoteIDs) {
+		return nil, errors.New("ordered_ids must include each current remote group exactly once")
+	}
+	if err := client.UpdateGroupSortOrders(ctx, sub2api.AdminTarget{BaseURL: target.BaseURL, APIKey: plain}, orderedIDs); err != nil {
+		s.recordTargetCheck(targetID, err)
+		return nil, err
+	}
+	if _, err := s.SyncTargetGroups(ctx, targetID); err != nil {
+		return nil, err
+	}
+	return s.ListTargetGroups(targetID, true)
+}
+
+func compactPositiveIDs(ids []int64) []int64 {
+	result := make([]int64, 0, len(ids))
+	seen := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result
+}
+
+func samePositiveIDSet(left, right []int64) bool {
+	left = compactPositiveIDs(left)
+	right = compactPositiveIDs(right)
+	if len(left) != len(right) {
+		return false
+	}
+	seen := make(map[int64]struct{}, len(left))
+	for _, id := range left {
+		seen[id] = struct{}{}
+	}
+	for _, id := range right {
+		if _, ok := seen[id]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // GetNewAPIAutoGroups reads the administrator setting that controls New API's
 // automatic-group priority. The remote root token remains server-side.
 func (s *Service) GetNewAPIAutoGroups(ctx context.Context, targetID uint) (*NewAPIAutoGroupsDTO, error) {
@@ -407,6 +491,87 @@ func (s *Service) UpdateNewAPIAutoGroups(ctx context.Context, targetID uint, gro
 	}
 	s.recordTargetCheck(targetID, nil)
 	return &NewAPIAutoGroupsDTO{Groups: normalized}, nil
+}
+
+// ListNewAPIGroups returns the groups configured by the New API administrator.
+// New API represents them through its root-only option values rather than a
+// standalone group resource.
+func (s *Service) ListNewAPIGroups(ctx context.Context, targetID uint) ([]NewAPIGroupDTO, error) {
+	target, apiKey, err := s.newAPITargetCredential(targetID)
+	if err != nil {
+		return nil, err
+	}
+	settings, err := s.getNewAPIGroupSettings(ctx, target.BaseURL, apiKey)
+	s.recordTargetCheck(targetID, err)
+	if err != nil {
+		return nil, err
+	}
+	return settings.Groups, nil
+}
+
+// SaveNewAPIGroup creates or updates one New API group. The group is made
+// usable by keeping GroupRatio and UserUsableGroups in sync.
+func (s *Service) SaveNewAPIGroup(ctx context.Context, targetID uint, in NewAPIGroupInput) (*NewAPIGroupDTO, error) {
+	target, apiKey, err := s.newAPITargetCredential(targetID)
+	if err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(in.Name)
+	if name == "" {
+		return nil, errors.New("New API group name is required")
+	}
+	if strings.EqualFold(name, "auto") {
+		return nil, errors.New("New API group name cannot be auto")
+	}
+	if in.Ratio < 0 {
+		return nil, errors.New("New API group ratio must not be negative")
+	}
+	settings, err := s.getNewAPIGroupSettings(ctx, target.BaseURL, apiKey)
+	if err != nil {
+		s.recordTargetCheck(targetID, err)
+		return nil, err
+	}
+	settings.GroupRatios[name] = in.Ratio
+	description := strings.TrimSpace(in.Description)
+	if description == "" {
+		description = name
+	}
+	settings.UserUsableGroups[name] = description
+	if err := s.putNewAPIGroupSettings(ctx, target.BaseURL, apiKey, settings); err != nil {
+		s.recordTargetCheck(targetID, err)
+		return nil, err
+	}
+	s.recordTargetCheck(targetID, nil)
+	return &NewAPIGroupDTO{Name: name, Ratio: in.Ratio, Description: description}, nil
+}
+
+func (s *Service) DeleteNewAPIGroup(ctx context.Context, targetID uint, name string) error {
+	target, apiKey, err := s.newAPITargetCredential(targetID)
+	if err != nil {
+		return err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" || strings.EqualFold(name, "auto") {
+		return errors.New("New API group name is invalid")
+	}
+	settings, err := s.getNewAPIGroupSettings(ctx, target.BaseURL, apiKey)
+	if err != nil {
+		s.recordTargetCheck(targetID, err)
+		return err
+	}
+	if _, exists := settings.GroupRatios[name]; !exists {
+		return errors.New("New API group not found")
+	}
+	delete(settings.GroupRatios, name)
+	delete(settings.UserUsableGroups, name)
+	delete(settings.TopupGroupRatios, name)
+	settings.AutoGroups = removeAutoGroup(settings.AutoGroups, name)
+	if err := s.putNewAPIGroupSettings(ctx, target.BaseURL, apiKey, settings); err != nil {
+		s.recordTargetCheck(targetID, err)
+		return err
+	}
+	s.recordTargetCheck(targetID, nil)
+	return nil
 }
 
 func normalizeTargetType(targetType string) string {
@@ -477,8 +642,12 @@ func (s *Service) getNewAPIAutoGroups(ctx context.Context, baseURL, apiKey strin
 }
 
 type newAPIGroupSettings struct {
-	AutoGroups      []string
-	AvailableGroups []string
+	AutoGroups       []string
+	AvailableGroups  []string
+	Groups           []NewAPIGroupDTO
+	GroupRatios      map[string]float64
+	UserUsableGroups map[string]string
+	TopupGroupRatios map[string]json.RawMessage
 }
 
 // getNewAPIGroupSettings reads AutoGroups along with the groups already
@@ -517,7 +686,11 @@ func (s *Service) getNewAPIGroupSettings(ctx context.Context, baseURL, apiKey st
 		}
 		return nil, errors.New(body.Message)
 	}
-	settings := &newAPIGroupSettings{}
+	settings := &newAPIGroupSettings{
+		GroupRatios:      make(map[string]float64),
+		UserUsableGroups: make(map[string]string),
+		TopupGroupRatios: make(map[string]json.RawMessage),
+	}
 	availableSet := make(map[string]struct{})
 	for _, option := range body.Data {
 		switch option.Key {
@@ -527,7 +700,24 @@ func (s *Service) getNewAPIGroupSettings(ctx context.Context, baseURL, apiKey st
 				return nil, fmt.Errorf("decode New API AutoGroups: %w", err)
 			}
 			settings.AutoGroups = normalizeAutoGroups(groups)
-		case "GroupRatio", "UserUsableGroups", "TopupGroupRatio":
+		case "GroupRatio":
+			if err := json.Unmarshal([]byte(option.Value), &settings.GroupRatios); err != nil {
+				return nil, fmt.Errorf("decode New API GroupRatio: %w", err)
+			}
+			for group := range settings.GroupRatios {
+				availableSet[group] = struct{}{}
+			}
+		case "UserUsableGroups":
+			if err := json.Unmarshal([]byte(option.Value), &settings.UserUsableGroups); err != nil {
+				return nil, fmt.Errorf("decode New API UserUsableGroups: %w", err)
+			}
+			for group := range settings.UserUsableGroups {
+				availableSet[group] = struct{}{}
+			}
+		case "TopupGroupRatio":
+			if err := json.Unmarshal([]byte(option.Value), &settings.TopupGroupRatios); err != nil {
+				return nil, fmt.Errorf("decode New API TopupGroupRatio: %w", err)
+			}
 			for _, group := range newAPIGroupNames(option.Value) {
 				availableSet[group] = struct{}{}
 			}
@@ -537,6 +727,20 @@ func (s *Service) getNewAPIGroupSettings(ctx context.Context, baseURL, apiKey st
 		availableSet[group] = struct{}{}
 	}
 	settings.AvailableGroups = sortedGroupNames(availableSet)
+	settings.Groups = make([]NewAPIGroupDTO, 0, len(settings.GroupRatios))
+	for name, ratio := range settings.GroupRatios {
+		if strings.EqualFold(name, "auto") {
+			continue
+		}
+		settings.Groups = append(settings.Groups, NewAPIGroupDTO{
+			Name:        name,
+			Ratio:       ratio,
+			Description: settings.UserUsableGroups[name],
+		})
+	}
+	sort.Slice(settings.Groups, func(i, j int) bool {
+		return strings.ToLower(settings.Groups[i].Name) < strings.ToLower(settings.Groups[j].Name)
+	})
 	return settings, nil
 }
 
@@ -574,7 +778,47 @@ func (s *Service) putNewAPIAutoGroups(ctx context.Context, baseURL, apiKey strin
 	if err != nil {
 		return err
 	}
-	body, err := json.Marshal(map[string]string{"key": "AutoGroups", "value": string(value)})
+	return s.putNewAPIOption(ctx, baseURL, apiKey, "AutoGroups", string(value))
+}
+
+func (s *Service) putNewAPIGroupSettings(ctx context.Context, baseURL, apiKey string, settings *newAPIGroupSettings) error {
+	if settings == nil {
+		return errors.New("New API group settings are required")
+	}
+	groupRatios, err := json.Marshal(settings.GroupRatios)
+	if err != nil {
+		return err
+	}
+	usableGroups, err := json.Marshal(settings.UserUsableGroups)
+	if err != nil {
+		return err
+	}
+	topupRatios, err := json.Marshal(settings.TopupGroupRatios)
+	if err != nil {
+		return err
+	}
+	autoGroups, err := json.Marshal(normalizeAutoGroups(settings.AutoGroups))
+	if err != nil {
+		return err
+	}
+	for _, option := range []struct {
+		key   string
+		value string
+	}{
+		{"GroupRatio", string(groupRatios)},
+		{"UserUsableGroups", string(usableGroups)},
+		{"TopupGroupRatio", string(topupRatios)},
+		{"AutoGroups", string(autoGroups)},
+	} {
+		if err := s.putNewAPIOption(ctx, baseURL, apiKey, option.key, option.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) putNewAPIOption(ctx context.Context, baseURL, apiKey, key, value string) error {
+	body, err := json.Marshal(map[string]string{"key": key, "value": value})
 	if err != nil {
 		return err
 	}
@@ -591,7 +835,7 @@ func (s *Service) putNewAPIAutoGroups(ctx context.Context, baseURL, apiKey strin
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("New API AutoGroups update failed: %s", resp.Status)
+		return fmt.Errorf("New API option %s update failed: %s", key, resp.Status)
 	}
 	var result struct {
 		Success bool   `json:"success"`
@@ -602,11 +846,21 @@ func (s *Service) putNewAPIAutoGroups(ctx context.Context, baseURL, apiKey strin
 	}
 	if !result.Success {
 		if result.Message == "" {
-			result.Message = "New API rejected AutoGroups update"
+			result.Message = "New API rejected option update"
 		}
 		return errors.New(result.Message)
 	}
 	return nil
+}
+
+func removeAutoGroup(groups []string, name string) []string {
+	result := make([]string, 0, len(groups))
+	for _, group := range groups {
+		if group != name {
+			result = append(result, group)
+		}
+	}
+	return result
 }
 
 func normalizeAutoGroups(groups []string) []string {
@@ -784,6 +1038,7 @@ func (s *Service) CreateSyncGroup(in SyncGroupDTO) (*SyncGroupDTO, error) {
 	if err := s.syncAccounts.SaveForGroup(item.ID, accounts); err != nil {
 		return nil, err
 	}
+	s.clearRateScanFingerprint(item.ID)
 	if err := s.ensureGatewayKeysForGroup(item, accounts); err != nil {
 		return nil, err
 	}
@@ -827,6 +1082,7 @@ func (s *Service) UpdateSyncGroup(id uint, in SyncGroupDTO) (*SyncGroupDTO, erro
 	if err := s.syncAccounts.SaveForGroup(item.ID, accounts); err != nil {
 		return nil, err
 	}
+	s.clearRateScanFingerprint(item.ID)
 	if err := s.ensureGatewayKeysForGroup(item, accounts); err != nil {
 		return nil, err
 	}
@@ -1319,7 +1575,7 @@ func (s *Service) applyAccount(
 		if groupErr != nil {
 			return nil, fmt.Errorf("gateway group missing: %d", *syncAccount.GatewayGroupID)
 		}
-		gatewayModels = gatewayModelMappingModels(gatewayGroup)
+		gatewayModels = gatewaySyncModels(s.gateway, gatewayGroup)
 		key, secret, err = s.ensureGatewayKey(syncGroup, syncAccount, keyName)
 		if err != nil {
 			return nil, err
@@ -2171,10 +2427,108 @@ func (s *Service) SyncAllOnRateScan(ctx context.Context) {
 		if !target.Enabled {
 			continue
 		}
-		if _, err := s.ApplySyncGroup(ctx, syncGroup.ID); err != nil && s.log != nil {
+		accounts, err := s.syncAccounts.ListBySyncGroupID(syncGroup.ID)
+		if err != nil {
+			if s.log != nil {
+				s.log.Warn("list sync accounts for rate scan", "syncGroupID", syncGroup.ID, "err", err)
+			}
+			continue
+		}
+		fingerprint, err := s.rateScanFingerprint(ctx, &syncGroup, accounts)
+		if err != nil {
+			if s.log != nil {
+				s.log.Warn("build sync rate fingerprint", "syncGroupID", syncGroup.ID, "err", err)
+			}
+			continue
+		}
+		unchanged := syncGroup.RateScanFingerprint != "" && syncGroup.RateScanFingerprint == fingerprint
+		if unchanged {
+			continue
+		}
+		log, err := s.ApplySyncGroup(ctx, syncGroup.ID)
+		if err != nil && s.log != nil {
 			s.log.Warn("apply sync group after rate scan", "syncGroupID", syncGroup.ID, "err", err)
+			continue
+		}
+		if log != nil && log.Success {
+			storedFingerprint := fingerprint
+			if refreshed, refreshErr := s.rateScanFingerprint(ctx, &syncGroup, accounts); refreshErr == nil {
+				storedFingerprint = refreshed
+			}
+			if err := s.syncGroups.UpdateRateScanFingerprint(syncGroup.ID, storedFingerprint); err != nil {
+				if s.log != nil {
+					s.log.Warn("save sync rate fingerprint", "syncGroupID", syncGroup.ID, "err", err)
+				}
+				continue
+			}
 		}
 	}
+}
+
+// rateScanFingerprint captures only the source values that affect a dynamic
+// sync group's generated account/group multipliers. It intentionally excludes
+// model settings: those are changed by explicit sync-group application.
+func (s *Service) rateScanFingerprint(ctx context.Context, syncGroup *storage.UpstreamSyncGroup, accounts []storage.UpstreamSyncAccount) (string, error) {
+	if syncGroup == nil {
+		return "", errors.New("sync group is required")
+	}
+	groupsByChannel := make(map[uint][]connector.APIKeyGroup)
+	for _, account := range accounts {
+		if isGatewaySyncAccount(&account) || account.SourceChannelID == 0 {
+			continue
+		}
+		if _, ok := groupsByChannel[account.SourceChannelID]; ok {
+			continue
+		}
+		if s.channelSvc != nil {
+			groups, err := s.channelSvc.ListAPIKeyGroups(ctx, account.SourceChannelID)
+			if err != nil {
+				return "", err
+			}
+			groupsByChannel[account.SourceChannelID] = groups
+		}
+	}
+	parts := make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		sourceGroupID := int64(0)
+		if account.SourceGroupID != nil {
+			sourceGroupID = *account.SourceGroupID
+		}
+		gatewayGroupID := uint(0)
+		if account.GatewayGroupID != nil {
+			gatewayGroupID = *account.GatewayGroupID
+		}
+		part := fmt.Sprintf("%d:%t:%s:%d:%d:%s:%d:%s:%s", account.ID, account.Enabled, normalizeSyncAccountSourceKind(account.SourceKind), account.SourceChannelID, sourceGroupID, strings.TrimSpace(account.SourceGroupName), gatewayGroupID, strings.TrimSpace(account.RateConvertMode), formatNumber(account.RateConvertValue))
+		if isGatewaySyncAccount(&account) {
+			rate, err := s.gatewayRateMultiplierForAccount(&account)
+			if err != nil {
+				return "", err
+			}
+			part += ":gateway:" + formatNumber(rate)
+		} else {
+			part += ":source:" + formatNumber(rateMultiplierForAccount(&account, groupsByChannel[account.SourceChannelID]))
+		}
+		parts = append(parts, part)
+	}
+	groupIDs, err := s.syncGroups.ParseTargetGroupIDs(syncGroup)
+	if err != nil {
+		return "", err
+	}
+	for _, groupID := range groupIDs {
+		group, err := s.groups.FindByID(groupID)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, fmt.Sprintf("target:%d:%d:%s", group.RemoteGroupID, group.ID, formatNumber(group.Ratio)))
+	}
+	if len(parts) == 0 {
+		return "<empty>", nil
+	}
+	return strings.Join(parts, "|"), nil
+}
+
+func (s *Service) clearRateScanFingerprint(syncGroupID uint) {
+	_ = s.syncGroups.UpdateRateScanFingerprint(syncGroupID, "")
 }
 
 func (s *Service) checkSourceGroup(ctx context.Context, syncAccount *storage.UpstreamSyncAccount) ([]connector.APIKeyGroup, error) {
@@ -2574,8 +2928,14 @@ func (s *Service) syncGatewayTargetGroupRates(
 			if group.RemoteGroupID <= 0 {
 				return nil, fmt.Errorf("target group %q has no remote ID", group.Name)
 			}
+			if nearlyEqualRate(group.Ratio, rate) {
+				continue
+			}
 			if err := client.UpdateGroupRateMultiplier(ctx, target, group.RemoteGroupID, rate); err != nil {
 				return nil, fmt.Errorf("update target group %q rate multiplier: %w", group.Name, err)
+			}
+			if err := s.groups.UpdateRatio(group.ID, rate); err != nil {
+				return nil, fmt.Errorf("save target group %q rate multiplier: %w", group.Name, err)
 			}
 			changes = append(changes, fmt.Sprintf(
 				"目标分组 %s 倍率 %s -> %s",
@@ -2883,12 +3243,17 @@ func modelMappingFromModels(models []string) map[string]string {
 	return out
 }
 
-func gatewayModelMappingModels(group *storage.GatewayGroup) []string {
+func gatewaySyncModels(gatewaySvc *gateway.Service, group *storage.GatewayGroup) []string {
 	if group == nil {
 		return nil
 	}
+	models := make([]string, 0)
+	if gatewaySvc != nil {
+		for _, item := range gatewaySvc.ParseModelsJSON(group.ModelsJSON) {
+			models = append(models, item.ID)
+		}
+	}
 	mapping := gateway.ParseModelMapping(group.ModelMappingJSON)
-	models := make([]string, 0, len(mapping))
 	for model := range mapping {
 		model = strings.TrimSpace(model)
 		if model == "" || model == "*" {
@@ -2896,8 +3261,14 @@ func gatewayModelMappingModels(group *storage.GatewayGroup) []string {
 		}
 		models = append(models, model)
 	}
+	models = uniqueStrings(models)
 	sort.Strings(models)
 	return models
+}
+
+func nearlyEqualRate(left, right float64) bool {
+	const epsilon = 1e-9
+	return left-right < epsilon && right-left < epsilon
 }
 
 func uniqueStrings(list []string) []string {

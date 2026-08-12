@@ -146,6 +146,13 @@ func (r *UpstreamSyncTargetGroups) FindByTargetAndRemote(targetID uint, remoteGr
 	return &item, nil
 }
 
+func (r *UpstreamSyncTargetGroups) UpdateRatio(id uint, ratio float64) error {
+	return r.db.Model(&UpstreamSyncTargetGroup{}).Where("id = ?", id).Updates(map[string]any{
+		"ratio":      ratio,
+		"updated_at": time.Now(),
+	}).Error
+}
+
 func (r *UpstreamSyncGroups) List() ([]UpstreamSyncGroup, error) {
 	var list []UpstreamSyncGroup
 	if err := r.db.Order("id ASC").Find(&list).Error; err != nil {
@@ -172,6 +179,9 @@ func (r *UpstreamSyncGroups) FindByName(name string) (*UpstreamSyncGroup, error)
 
 func (r *UpstreamSyncGroups) Create(item *UpstreamSyncGroup) error { return r.db.Create(item).Error }
 func (r *UpstreamSyncGroups) Update(item *UpstreamSyncGroup) error { return r.db.Save(item).Error }
+func (r *UpstreamSyncGroups) UpdateRateScanFingerprint(id uint, fingerprint string) error {
+	return r.db.Model(&UpstreamSyncGroup{}).Where("id = ?", id).Update("rate_scan_fingerprint", fingerprint).Error
+}
 func (r *UpstreamSyncGroups) Delete(id uint) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("sync_group_id = ?", id).Delete(&UpstreamSyncManagedAccount{}).Error; err != nil {

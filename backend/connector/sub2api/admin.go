@@ -33,8 +33,24 @@ type AdminGroup struct {
 	Ratio          float64 `json:"ratio"`
 	RateMultiplier float64 `json:"rate_multiplier"`
 	Status         string  `json:"status"`
-	Sort           int     `json:"sort"`
+	Sort           int     `json:"sort_order"`
 	Description    string  `json:"description"`
+}
+
+func (g *AdminGroup) UnmarshalJSON(data []byte) error {
+	type adminGroupAlias AdminGroup
+	var raw struct {
+		adminGroupAlias
+		LegacySort int `json:"sort"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*g = AdminGroup(raw.adminGroupAlias)
+	if g.Sort == 0 && raw.LegacySort != 0 {
+		g.Sort = raw.LegacySort
+	}
+	return nil
 }
 
 type AdminProxy struct {
@@ -97,6 +113,50 @@ func (a *AdminClient) ListGroups(ctx context.Context, t AdminTarget, includeInac
 	}
 	normalizeAdminGroupRatios(wrapped.Items)
 	return wrapped.Items, nil
+}
+
+// UpdateGroupSortOrders persists the ordered sort values of Sub2API groups.
+func (a *AdminClient) UpdateGroupSortOrders(ctx context.Context, t AdminTarget, orderedIDs []int64) error {
+	updates := make([]map[string]any, 0, len(orderedIDs))
+	for index, id := range orderedIDs {
+		if id <= 0 {
+			continue
+		}
+		updates = append(updates, map[string]any{
+			"id":         id,
+			"sort_order": index + 1,
+		})
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	body, err := json.Marshal(map[string]any{"updates": updates})
+	if err != nil {
+		return err
+	}
+	resp, err := a.client.http.R().
+		SetContext(ctx).
+		SetHeader("Content-Type", "application/json").
+		SetHeader("x-api-key", t.APIKey).
+		SetBody(body).
+		Put(strings.TrimRight(t.BaseURL, "/") + "/api/v1/admin/groups/sort-order")
+	if err != nil {
+		return err
+	}
+	if resp.IsError() {
+		return fmt.Errorf("update admin group sort order: %w", connector.HTTPStatusError(resp.StatusCode(), resp.Body()))
+	}
+	var result struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(resp.Body(), &result); err != nil {
+		return fmt.Errorf("decode admin group sort order response: %w", err)
+	}
+	if result.Code != 0 {
+		return errors.New(strings.TrimSpace(result.Message))
+	}
+	return nil
 }
 
 func (a *AdminClient) ListProxies(ctx context.Context, t AdminTarget) ([]AdminProxy, error) {

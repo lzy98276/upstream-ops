@@ -68,12 +68,5 @@ cmd/seed-demo/
 frontend/tsconfig.tsbuildinfo
 
 docs/md
-/frontend
-# Keep the update dialog source tracked while retaining the broad local frontend ignore.
-!/frontend/
-frontend/*
-!/frontend/components/
-frontend/components/*
-!/frontend/components/monitor/
-frontend/components/monitor/*
-!/frontend/components/monitor/update-dialog.tsx
+/.playwright-cli
+/frontend/.playwright-cli
