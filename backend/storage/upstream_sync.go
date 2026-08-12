@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -146,6 +147,17 @@ func (r *UpstreamSyncTargetGroups) FindByTargetAndRemote(targetID uint, remoteGr
 	return &item, nil
 }
 
+// UpdateRemoteGroupID migrates a target group's external identifier while
+// retaining its local primary key and any synchronization-group references.
+func (r *UpstreamSyncTargetGroups) UpdateRemoteGroupID(id, targetID uint, remoteGroupID int64) error {
+	return r.db.Model(&UpstreamSyncTargetGroup{}).
+		Where("id = ? AND target_id = ?", id, targetID).
+		Updates(map[string]any{
+			"remote_group_id": remoteGroupID,
+			"updated_at":      time.Now(),
+		}).Error
+}
+
 func (r *UpstreamSyncTargetGroups) UpdateRatio(id uint, ratio float64) error {
 	return r.db.Model(&UpstreamSyncTargetGroup{}).Where("id = ?", id).Updates(map[string]any{
 		"ratio":      ratio,
@@ -155,7 +167,7 @@ func (r *UpstreamSyncTargetGroups) UpdateRatio(id uint, ratio float64) error {
 
 func (r *UpstreamSyncGroups) List() ([]UpstreamSyncGroup, error) {
 	var list []UpstreamSyncGroup
-	if err := r.db.Order("id ASC").Find(&list).Error; err != nil {
+	if err := r.db.Order("target_id ASC, sort ASC, id ASC").Find(&list).Error; err != nil {
 		return nil, err
 	}
 	return list, nil
@@ -179,6 +191,54 @@ func (r *UpstreamSyncGroups) FindByName(name string) (*UpstreamSyncGroup, error)
 
 func (r *UpstreamSyncGroups) Create(item *UpstreamSyncGroup) error { return r.db.Create(item).Error }
 func (r *UpstreamSyncGroups) Update(item *UpstreamSyncGroup) error { return r.db.Save(item).Error }
+
+func (r *UpstreamSyncGroups) NextSort(targetID uint) (int, error) {
+	var maxSort int
+	if err := r.db.Model(&UpstreamSyncGroup{}).
+		Where("target_id = ?", targetID).
+		Select("COALESCE(MAX(sort), 0)").
+		Scan(&maxSort).Error; err != nil {
+		return 0, err
+	}
+	return maxSort + 1, nil
+}
+
+// Reorder rewrites the complete sort order for a target's synchronization
+// groups. Requiring every group prevents a partial request from losing rows.
+func (r *UpstreamSyncGroups) Reorder(targetID uint, ids []uint) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		var existing []UpstreamSyncGroup
+		if err := tx.Where("target_id = ?", targetID).Find(&existing).Error; err != nil {
+			return err
+		}
+		if len(ids) != len(existing) {
+			return fmt.Errorf("ids must include each synchronization group exactly once")
+		}
+
+		existingIDs := make(map[uint]struct{}, len(existing))
+		for _, item := range existing {
+			existingIDs[item.ID] = struct{}{}
+		}
+		seen := make(map[uint]struct{}, len(ids))
+		for _, id := range ids {
+			if _, exists := existingIDs[id]; !exists {
+				return fmt.Errorf("synchronization group %d does not belong to target %d", id, targetID)
+			}
+			if _, exists := seen[id]; exists {
+				return fmt.Errorf("ids must not contain duplicates")
+			}
+			seen[id] = struct{}{}
+		}
+		for index, id := range ids {
+			if err := tx.Model(&UpstreamSyncGroup{}).
+				Where("id = ? AND target_id = ?", id, targetID).
+				Update("sort", index+1).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
 func (r *UpstreamSyncGroups) UpdateRateScanFingerprint(id uint, fingerprint string) error {
 	return r.db.Model(&UpstreamSyncGroup{}).Where("id = ?", id).Update("rate_scan_fingerprint", fingerprint).Error
 }
@@ -272,6 +332,7 @@ func (r *UpstreamSyncAccounts) SaveForGroup(syncGroupID uint, list []UpstreamSyn
 					"proxy_id":           list[i].ProxyID,
 					"concurrency":        list[i].Concurrency,
 					"weight":             list[i].Weight,
+					"priority":           list[i].Priority,
 					"rate_convert_mode":  list[i].RateConvertMode,
 					"rate_convert_value": list[i].RateConvertValue,
 					"enabled":            list[i].Enabled,

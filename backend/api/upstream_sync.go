@@ -32,6 +32,7 @@ func registerUpstreamSync(g *gin.RouterGroup, d *Deps) {
 	gp.GET("/source-models", func(c *gin.Context) { listUpstreamSyncSourceModels(c, d) })
 	gp.GET("/sync-groups", func(c *gin.Context) { listUpstreamSyncGroups(c, d) })
 	gp.POST("/sync-groups", func(c *gin.Context) { createUpstreamSyncGroup(c, d) })
+	gp.PUT("/sync-groups/reorder", func(c *gin.Context) { reorderUpstreamSyncGroups(c, d) })
 	gp.PUT("/sync-groups/:id", func(c *gin.Context) { updateUpstreamSyncGroup(c, d) })
 	gp.DELETE("/sync-groups/:id", func(c *gin.Context) { deleteUpstreamSyncGroup(c, d) })
 	gp.POST("/sync-groups/:id/apply", func(c *gin.Context) { applyUpstreamSyncGroup(c, d) })
@@ -216,7 +217,7 @@ func syncUpstreamSyncTargetGroups(c *gin.Context, d *Deps) {
 	}
 	list, err := d.UpstreamSync.SyncTargetGroups(c.Request.Context(), id)
 	if err != nil {
-		fail(c, http.StatusInternalServerError, err)
+		fail(c, http.StatusBadGateway, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": list})
@@ -250,9 +251,13 @@ func reorderUpstreamSyncTargetGroups(c *gin.Context, d *Deps) {
 		fail(c, http.StatusBadRequest, err)
 		return
 	}
-	list, err := d.UpstreamSync.ReorderSub2APIGroups(c.Request.Context(), id, in.OrderedIDs)
+	list, err := d.UpstreamSync.ReorderTargetGroups(c.Request.Context(), id, in.OrderedIDs)
 	if err != nil {
-		fail(c, http.StatusInternalServerError, err)
+		if errors.Is(err, syncer.ErrInvalidTargetGroupOrder) {
+			fail(c, http.StatusBadRequest, err)
+			return
+		}
+		fail(c, http.StatusBadGateway, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": list})
@@ -331,6 +336,23 @@ func createUpstreamSyncGroup(c *gin.Context, d *Deps) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": item})
+}
+
+func reorderUpstreamSyncGroups(c *gin.Context, d *Deps) {
+	var in struct {
+		TargetID uint   `json:"target_id"`
+		IDs      []uint `json:"ids"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		fail(c, http.StatusBadRequest, err)
+		return
+	}
+	list, err := d.UpstreamSync.ReorderSyncGroups(in.TargetID, in.IDs)
+	if err != nil {
+		fail(c, http.StatusBadRequest, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": list})
 }
 
 func updateUpstreamSyncGroup(c *gin.Context, d *Deps) {

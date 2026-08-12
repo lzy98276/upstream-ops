@@ -561,6 +561,7 @@ export interface UpstreamSyncAccount {
   proxy_id?: number | null;
   concurrency: number;
   weight: number;
+  priority: number;
   rate_convert_mode: UpstreamSyncRateConvertMode;
   rate_convert_value: number;
   enabled: boolean;
@@ -569,13 +570,15 @@ export interface UpstreamSyncAccount {
 }
 
 export interface UpstreamSyncGroup {
-  id: number;
-  display_name: string;
-  name_template: string;
-  name: string;
-  target_id: number;
-  target_group_ids: number[];
-  platform: string;
+	id: number;
+	sort: number;
+	display_name: string;
+	name_template: string;
+	name: string;
+	target_id: number;
+	target_group_ids: number[];
+	sync_mode?: "account" | "gateway_rate";
+	platform: string;
   model_limits_mode: string;
   model_limits?: string;
   pool_mode_enabled: boolean;
@@ -795,6 +798,24 @@ export interface GatewayRoute {
   temp_unschedulable_request_id?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface GatewayRateSyncStatus {
+  group_id: number;
+  group_name: string;
+  group_status: GatewayGroupStatus;
+  route_count: number;
+  enabled_route_count: number;
+  positive_rate_route_count: number;
+  min_rate: number;
+  max_rate: number;
+  ready: boolean;
+  reason_code?:
+    | "group_disabled"
+    | "no_routes"
+    | "no_enabled_routes"
+    | "no_positive_rate_routes";
+  reason?: string;
 }
 
 export interface GatewayModelSource {

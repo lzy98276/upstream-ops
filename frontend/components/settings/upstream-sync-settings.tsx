@@ -79,8 +79,8 @@ import { useChannels } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import type {
   GatewayGroup,
-  GatewayRoute,
-  NewAPIAutoGroups,
+
+  GatewayRateSyncStatus,
   NewAPIGroup,
   RateSnapshot,
   UpstreamSyncLog,
@@ -143,6 +143,7 @@ interface SyncAccountForm {
   proxy_id: string;
   concurrency: number;
   weight: number;
+  priority: number;
   rate_convert_mode: UpstreamSyncRateConvertMode;
   rate_convert_value: string;
   enabled: boolean;
@@ -199,6 +200,7 @@ const emptySyncAccountForm: SyncAccountForm = {
   proxy_id: "",
   concurrency: 10,
   weight: 1,
+  priority: 0,
   rate_convert_mode: "raw",
   rate_convert_value: "1",
   enabled: true,
@@ -266,6 +268,7 @@ function accountToForm(account: UpstreamSyncAccount): SyncAccountForm {
     proxy_id: account.proxy_id == null ? "" : String(account.proxy_id),
     concurrency: account.concurrency || 10,
     weight: account.weight || 1,
+    priority: account.priority || 0,
     rate_convert_mode: account.rate_convert_mode || "raw",
     rate_convert_value: String(account.rate_convert_value ?? 1),
     enabled: account.enabled,
@@ -356,6 +359,21 @@ function sortSyncAccountRows(
 function formatRate(value: number) {
   if (!Number.isFinite(value)) return "0";
   return Number(value.toFixed(8)).toString();
+}
+
+function gatewayRateSyncStatusMessage(status: GatewayRateSyncStatus) {
+  switch (status.reason_code) {
+    case "group_disabled":
+      return "所选网关组已禁用，无法用于倍率同步。";
+    case "no_routes":
+      return "所选网关组尚未配置路由。请至少添加一条已启用的路由。";
+    case "no_enabled_routes":
+      return "所选网关组没有启用的路由。请启用至少一条路由后再同步倍率。";
+    case "no_positive_rate_routes":
+      return "所选网关组的启用路由没有正的有效计费倍率。请检查路由倍率配置。";
+    default:
+      return status.reason || "所选网关组暂不能用于倍率同步。";
+  }
 }
 
 function sourceGroupOptionValue(group: RateSnapshot) {
@@ -539,15 +557,13 @@ export function UpstreamSyncSettings() {
     emptyNewAPITargetForm,
   );
   const [newAPITargetDialogOpen, setNewAPITargetDialogOpen] = useState(false);
-  const [autoGroupsDialogTarget, setAutoGroupsDialogTarget] =
+  const [sub2APIRemoteGroupsDialogTarget, setSub2APIRemoteGroupsDialogTarget] =
     useState<UpstreamSyncTarget | null>(null);
-  const [autoGroups, setAutoGroups] = useState<string[]>([]);
-  const [autoGroupDragOver, setAutoGroupDragOver] = useState<string | null>(
-    null,
-  );
-  const [availableAutoGroups, setAvailableAutoGroups] = useState<string[]>([]);
-  const [newAutoGroup, setNewAutoGroup] = useState("");
-  const [autoGroupsLoading, setAutoGroupsLoading] = useState(false);
+  const [sub2APIRemoteGroups, setSub2APIRemoteGroups] = useState<
+    UpstreamSyncTargetGroup[]
+  >([]);
+  const [sub2APIRemoteGroupsLoading, setSub2APIRemoteGroupsLoading] =
+    useState(false);
   const [newAPIGroupsDialogTarget, setNewAPIGroupsDialogTarget] =
     useState<UpstreamSyncTarget | null>(null);
   const [newAPIGroups, setNewAPIGroups] = useState<NewAPIGroup[]>([]);
@@ -581,8 +597,13 @@ export function UpstreamSyncSettings() {
       return;
     }
     void loadTargetGroups(syncGroupForm.target_id);
-    void loadTargetProxies(syncGroupForm.target_id);
-  }, [syncGroupForm.target_id]);
+    const target = targets.find((item) => item.id === syncGroupForm.target_id);
+    if (target?.target_type === "sub2api") {
+      void loadTargetProxies(syncGroupForm.target_id);
+    } else {
+      setTargetProxies([]);
+    }
+  }, [syncGroupForm.target_id, targets]);
 
   useEffect(() => {
     if (!logSyncGroupID) return;
@@ -660,6 +681,20 @@ export function UpstreamSyncSettings() {
         `/upstream-sync/targets/${targetID}/groups?include_missing=1`,
       );
       setTargetGroups(list);
+      const target = targets.find((item) => item.id === targetID);
+      if (target?.target_type === "newapi" && list.length > 0) {
+        setSyncGroupForm((prev) => {
+          if (prev.target_id !== targetID || prev.target_group_ids.length > 0) {
+            return prev;
+          }
+          const defaultGroup = list.find(
+            (group) => group.name.trim().toLowerCase() === "default",
+          );
+          return defaultGroup
+            ? { ...prev, target_group_ids: [defaultGroup.id] }
+            : prev;
+        });
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "加载目标分组失败");
     }
@@ -699,7 +734,7 @@ export function UpstreamSyncSettings() {
     setLogs([]);
     setLogSyncGroupID(null);
     void loadTargetGroups(target.id);
-    void loadTargetProxies(target.id);
+    if (target.target_type !== "newapi") void loadTargetProxies(target.id);
   }
 
   function openNewSyncGroupDialog(targetID = selectedTargetID) {
@@ -712,7 +747,8 @@ export function UpstreamSyncSettings() {
     });
     setSyncGroupDialogOpen(true);
     void loadTargetGroups(targetID);
-    void loadTargetProxies(targetID);
+    const target = targets.find((item) => item.id === targetID);
+    if (target?.target_type !== "newapi") void loadTargetProxies(targetID);
   }
 
   function openEditSyncGroupDialog(syncGroup: UpstreamSyncGroup) {
@@ -720,7 +756,9 @@ export function UpstreamSyncSettings() {
     setSyncGroupForm(form);
     setSyncGroupDialogOpen(true);
     void loadTargetGroups(syncGroup.target_id);
-    void loadTargetProxies(syncGroup.target_id);
+    const target = targets.find((item) => item.id === syncGroup.target_id);
+    if (target?.target_type !== "newapi")
+      void loadTargetProxies(syncGroup.target_id);
     form.accounts.forEach((account) => {
       if (account.source_channel_id)
         void loadSourceGroups(account.source_channel_id);
@@ -778,30 +816,6 @@ export function UpstreamSyncSettings() {
     }
   }
 
-  const openAutoGroupsDialog = useCallback(
-    async (target: UpstreamSyncTarget) => {
-      setAutoGroupsDialogTarget(target);
-      setAutoGroups([]);
-      setAutoGroupDragOver(null);
-      setAvailableAutoGroups([]);
-      setNewAutoGroup("");
-      setAutoGroupsLoading(true);
-      try {
-        const result = await apiFetch<NewAPIAutoGroups>(
-          `/upstream-sync/targets/${target.id}/newapi/auto-groups`,
-        );
-        setAutoGroups(result.groups ?? []);
-        setAvailableAutoGroups(result.available_groups ?? []);
-      } catch (err) {
-        setAutoGroupsDialogTarget(null);
-        toast.error(err instanceof Error ? err.message : "加载自动分组失败");
-      } finally {
-        setAutoGroupsLoading(false);
-      }
-    },
-    [],
-  );
-
   const openNewAPIGroupsDialog = useCallback(
     async (target: UpstreamSyncTarget, announceSync = false) => {
       setNewAPIGroupsDialogTarget(target);
@@ -825,6 +839,41 @@ export function UpstreamSyncSettings() {
       }
     },
     [],
+  );
+
+  const openRemoteGroupsDialog = useCallback(
+    async (target: UpstreamSyncTarget, forceSync = false) => {
+      setSub2APIRemoteGroupsDialogTarget(target);
+      setSub2APIRemoteGroups([]);
+      setSub2APIRemoteGroupsLoading(true);
+      try {
+        let groups = await apiFetch<UpstreamSyncTargetGroup[]>(
+          `/upstream-sync/targets/${target.id}/groups`,
+        );
+        // A NewAPI cache created before the special auto group was supported
+        // needs one refresh so the remote-group dialog has a complete snapshot.
+        const needsInitialSync =
+          target.target_type !== "newapi" ||
+          forceSync ||
+          groups.length === 0 ||
+          (target.target_type === "newapi" &&
+            !groups.some((group) => group.name.toLowerCase() === "auto"));
+        if (needsInitialSync) {
+          groups = await apiFetch<UpstreamSyncTargetGroup[]>(
+            `/upstream-sync/targets/${target.id}/groups/sync`,
+            { method: "POST" },
+          );
+        }
+        setSub2APIRemoteGroups(groups);
+        if (selectedTargetID === target.id) setTargetGroups(groups);
+      } catch (err) {
+        setSub2APIRemoteGroupsDialogTarget(null);
+        toast.error(err instanceof Error ? err.message : "加载远端分组失败");
+      } finally {
+        setSub2APIRemoteGroupsLoading(false);
+      }
+    },
+    [selectedTargetID],
   );
 
   function editNewAPIGroup(group: NewAPIGroup) {
@@ -912,65 +961,6 @@ export function UpstreamSyncSettings() {
     }
   }
 
-  async function saveAutoGroups() {
-    if (!autoGroupsDialogTarget) return;
-    setBusy(`auto-groups-${autoGroupsDialogTarget.id}`);
-    try {
-      const result = await apiFetch<NewAPIAutoGroups>(
-        `/upstream-sync/targets/${autoGroupsDialogTarget.id}/newapi/auto-groups`,
-        { method: "PUT", body: JSON.stringify({ groups: autoGroups }) },
-      );
-      setAutoGroups(result.groups ?? []);
-      await loadBase();
-      toast.success("自动分组顺序已保存");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "保存自动分组失败");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  function addAutoGroup() {
-    const name = newAutoGroup.trim();
-    if (!name) return;
-    if (autoGroups.includes(name)) {
-      toast.error("该分组已在自动分组列表中");
-      return;
-    }
-    setAutoGroups((groups) => [...groups, name]);
-    setNewAutoGroup("");
-  }
-
-  function moveAutoGroup(index: number, direction: -1 | 1) {
-    setAutoGroups((groups) => {
-      const nextIndex = index + direction;
-      if (nextIndex < 0 || nextIndex >= groups.length) return groups;
-      const next = [...groups];
-      [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
-      return next;
-    });
-  }
-
-  function moveAutoGroupByName(fromGroup: string, toGroup: string) {
-    if (fromGroup === toGroup) return;
-    setAutoGroups((groups) => {
-      const fromIndex = groups.indexOf(fromGroup);
-      const toIndex = groups.indexOf(toGroup);
-      if (fromIndex < 0 || toIndex < 0) return groups;
-      const next = [...groups];
-      const [item] = next.splice(fromIndex, 1);
-      next.splice(toIndex, 0, item);
-      return next;
-    });
-  }
-
-  function toggleAvailableAutoGroup(group: string, checked: boolean) {
-    setAutoGroups((groups) => {
-      if (checked) return groups.includes(group) ? groups : [...groups, group];
-      return groups.filter((item) => item !== group);
-    });
-  }
-
   async function saveTarget() {
     setBusy("target");
     try {
@@ -1020,7 +1010,7 @@ export function UpstreamSyncSettings() {
         selectedTargetID === target.id
       ) {
         await loadTargetGroups(target.id);
-        await loadTargetProxies(target.id);
+        if (target.target_type !== "newapi") await loadTargetProxies(target.id);
       }
       toast.success(`${target.name} 分组已同步`);
     } catch (err) {
@@ -1044,11 +1034,12 @@ export function UpstreamSyncSettings() {
           body: JSON.stringify({ ordered_ids: orderedIDs }),
         },
       );
-      setTargetGroups(result);
+      if (selectedTargetID === target.id) setTargetGroups(result);
+      setSub2APIRemoteGroups(result);
       toast.success(`${target.name} 上游分组排序已更新`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "更新上游分组排序失败");
-      await loadTargetGroups(target.id);
+      if (selectedTargetID === target.id) await loadTargetGroups(target.id);
     } finally {
       setBusy(null);
     }
@@ -1064,6 +1055,37 @@ export function UpstreamSyncSettings() {
       toast.success(`${target.name} 同步分组列表已刷新`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "刷新同步分组列表失败");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function reorderSyncGroups(
+    target: UpstreamSyncTarget,
+    orderedGroups: UpstreamSyncGroup[],
+  ) {
+    const previous = syncGroupList;
+    const orderedIDs = orderedGroups.map((group) => group.id);
+    setSyncGroupList((groups) =>
+      groups.map((group) => {
+        const index = orderedIDs.indexOf(group.id);
+        return index >= 0 ? { ...group, sort: index + 1 } : group;
+      }),
+    );
+    setBusy(`sync-group-order-${target.id}`);
+    try {
+      const result = await apiFetch<UpstreamSyncGroup[]>(
+        "/upstream-sync/sync-groups/reorder",
+        {
+          method: "PUT",
+          body: JSON.stringify({ target_id: target.id, ids: orderedIDs }),
+        },
+      );
+      setSyncGroupList(result);
+      toast.success(`${target.name} 同步分组排序已更新`);
+    } catch (err) {
+      setSyncGroupList(previous);
+      toast.error(err instanceof Error ? err.message : "更新同步分组排序失败");
     } finally {
       setBusy(null);
     }
@@ -1101,13 +1123,18 @@ export function UpstreamSyncSettings() {
   }
 
   function syncGroupToForm(syncGroup: UpstreamSyncGroup): SyncGroupForm {
-    const allAccounts = syncGroup.accounts?.map(accountToForm) ?? [];
-    const gatewayRateSync =
-      allAccounts.find((account) => account.source_kind === "gateway_group") ??
-      null;
-    return {
-      id: syncGroup.id,
-      sync_mode: gatewayRateSync ? "gateway_rate" : "account",
+	const allAccounts = syncGroup.accounts?.map(accountToForm) ?? [];
+	const gatewayRateSync =
+	  allAccounts.find((account) => account.source_kind === "gateway_group") ??
+	  null;
+	const syncMode =
+	  syncGroup.sync_mode === "gateway_rate" ||
+	  (!syncGroup.sync_mode && gatewayRateSync)
+	    ? "gateway_rate"
+	    : "account";
+	return {
+	  id: syncGroup.id,
+	  sync_mode: syncMode,
       display_name: syncGroup.display_name || syncGroup.name,
       name_template: syncGroup.name_template,
       target_id: syncGroup.target_id,
@@ -1125,9 +1152,9 @@ export function UpstreamSyncSettings() {
       custom_error_codes_enabled: syncGroup.custom_error_codes_enabled,
       custom_error_codes: syncGroup.custom_error_codes ?? "",
       rate_sort_direction: syncGroup.rate_sort_direction || "asc",
-      accounts:
-        allAccounts.filter((account) => account.source_kind !== "gateway_group")
-          .length > 0
+	  accounts:
+		allAccounts.filter((account) => account.source_kind !== "gateway_group")
+		  .length > 0
           ? allAccounts.filter(
               (account) => account.source_kind !== "gateway_group",
             )
@@ -1177,13 +1204,25 @@ export function UpstreamSyncSettings() {
         return;
       }
       if (
-        syncGroupForm.sync_mode === "gateway_rate" &&
-        syncGroupForm.gateway_rate_sync &&
+	    syncGroupForm.sync_mode === "gateway_rate" &&
+	    syncGroupForm.gateway_rate_sync &&
         !syncGroupForm.gateway_rate_sync.gateway_group_id
       ) {
         toast.error("倍率同步未选择网关");
         return;
       }
+	  if (
+	    syncGroupForm.sync_mode === "gateway_rate" &&
+	    syncGroupForm.gateway_rate_sync?.gateway_group_id
+	  ) {
+	    const rateStatus = await apiFetch<GatewayRateSyncStatus>(
+	      `/gateway/groups/${syncGroupForm.gateway_rate_sync.gateway_group_id}/rate-sync-status`,
+	    );
+	    if (!rateStatus.ready) {
+	      toast.error(gatewayRateSyncStatusMessage(rateStatus));
+	      return;
+	    }
+	  }
       if (
         syncGroupForm.sync_mode === "gateway_rate" &&
         syncGroupForm.gateway_rate_sync &&
@@ -1218,10 +1257,16 @@ export function UpstreamSyncSettings() {
   async function applySyncGroup(syncGroup: UpstreamSyncGroup) {
     setBusy(`apply-${syncGroup.id}`);
     try {
-      await apiFetch(`/upstream-sync/sync-groups/${syncGroup.id}/apply`, {
+      const result = await apiFetch<{
+        success?: boolean;
+        message?: string;
+      }>(`/upstream-sync/sync-groups/${syncGroup.id}/apply`, {
         method: "POST",
       });
       await loadBase();
+      if (result && result.success === false) {
+        throw new Error(result.message || "应用失败");
+      }
       toast.success(`${syncGroup.name} 已应用`);
     } catch (err) {
       await loadBase();
@@ -1395,6 +1440,17 @@ export function UpstreamSyncSettings() {
                         <RefreshCw className="size-3.5" />
                         同步分组
                       </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-8 flex-1 px-3 xl:flex-none"
+                        onClick={() =>
+                          void openRemoteGroupsDialog(target)
+                        }
+                      >
+                        <ListTree className="size-3.5" />
+                        远端分组
+                      </Button>
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <Button
@@ -1434,17 +1490,13 @@ export function UpstreamSyncSettings() {
                   </div>
                   {isGroupOpen ? (
                     <div className="mt-4 border-t border-border pt-4">
-                      <TargetGroupOrderList
-                        target={target}
-                        groups={targetGroups}
-                        busy={busy === `group-order-${target.id}`}
-                        onReorder={(groups) =>
-                          void reorderTargetGroups(target, groups)
-                        }
-                      />
                       <SyncGroupList
+                        target={target}
                         syncGroups={targetSyncGroups}
                         busy={busy}
+                        onReorder={(groups) =>
+                          void reorderSyncGroups(target, groups)
+                        }
                         onAdd={() => openNewSyncGroupDialog(target.id)}
                         onRefresh={() => refreshSyncGroups(target)}
                         refreshBusy={
@@ -1467,7 +1519,7 @@ export function UpstreamSyncSettings() {
 
       <Panel
         title="New API 上游列表"
-        description="管理 New API 管理员设置中的分组、倍率与自动分组顺序；该列表不会进入 Sub2API 的账号托管同步流程。"
+        description="同步远端分组后，可按与 Sub2API 相同的方式创建同步分组；应用后会在 New API 的渠道页面创建或更新渠道。"
         action={
           <Button
             size="sm"
@@ -1483,7 +1535,12 @@ export function UpstreamSyncSettings() {
           <EmptyBox text="还没有 New API 上游配置。" />
         ) : (
           <div className="space-y-3">
-            {newAPITargets.map((target) => (
+            {newAPITargets.map((target) => {
+              const syncGroupCount = syncGroupList.filter(
+                (syncGroup) => syncGroup.target_id === target.id,
+              ).length;
+              const isGroupOpen = selectedTargetID === target.id;
+              return (
               <div
                 key={target.id}
                 className="rounded-2xl border border-border bg-background/80 p-4"
@@ -1501,6 +1558,12 @@ export function UpstreamSyncSettings() {
                       {target.last_check_status ? (
                         <StatusBadge status={target.last_check_status} />
                       ) : null}
+                      <Badge
+                        variant="outline"
+                        className="border-border bg-muted/40"
+                      >
+                        {syncGroupCount} 个同步分组
+                      </Badge>
                     </div>
                     <p className="break-all text-xs text-muted-foreground">
                       {target.base_url}
@@ -1523,21 +1586,20 @@ export function UpstreamSyncSettings() {
                   <div className="flex w-full items-center gap-2 xl:w-auto xl:justify-end">
                     <Button
                       size="sm"
-                      variant="outline"
+                      variant={isGroupOpen ? "default" : "outline"}
                       className="h-8 flex-1 px-3 xl:flex-none"
-                      onClick={() => void openNewAPIGroupsDialog(target)}
+                      onClick={() => openGroupManagement(target)}
+                      aria-expanded={isGroupOpen}
                     >
                       <ListTree className="size-3.5" />
-                      分组管理
+                      {isGroupOpen ? "收起分组" : "分组管理"}
                     </Button>
                     <Button
                       size="sm"
                       variant="outline"
                       className="h-8 px-3"
-                      onClick={() =>
-                        void openNewAPIGroupsDialog(target, true)
-                      }
-                      disabled={newAPIGroupsLoading}
+                      onClick={() => syncTargetGroups(target)}
+                      disabled={busy === `groups-${target.id}`}
                     >
                       <RefreshCw className="size-3.5" />
                       同步分组
@@ -1546,10 +1608,10 @@ export function UpstreamSyncSettings() {
                       size="sm"
                       variant="outline"
                       className="h-8 flex-1 px-3 xl:flex-none"
-                      onClick={() => void openAutoGroupsDialog(target)}
+                      onClick={() => void openRemoteGroupsDialog(target)}
                     >
                       <ListTree className="size-3.5" />
-                      自动分组
+                      远端分组
                     </Button>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
@@ -1575,6 +1637,12 @@ export function UpstreamSyncSettings() {
                           <PencilLine className="size-4" />
                           编辑上游
                         </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onSelect={() => void openNewAPIGroupsDialog(target)}
+                        >
+                          <ListTree className="size-4" />
+                          管理分组倍率
+                        </DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem
                           variant="destructive"
@@ -1588,8 +1656,29 @@ export function UpstreamSyncSettings() {
                     </DropdownMenu>
                   </div>
                 </div>
+                {isGroupOpen ? (
+                  <div className="mt-4 border-t border-border pt-4">
+                    <SyncGroupList
+                      target={target}
+                      syncGroups={targetSyncGroups}
+                      busy={busy}
+                      onReorder={(groups) =>
+                        void reorderSyncGroups(target, groups)
+                      }
+                      onAdd={() => openNewSyncGroupDialog(target.id)}
+                      onRefresh={() => refreshSyncGroups(target)}
+                      refreshBusy={busy === `sync-groups-refresh-${target.id}`}
+                      onApply={applySyncGroup}
+                      onLogs={loadLogs}
+                      onEdit={openEditSyncGroupDialog}
+                      onDeleteManaged={deleteManaged}
+                      onDelete={deleteSyncGroup}
+                    />
+                  </div>
+                ) : null}
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </Panel>
@@ -1705,6 +1794,11 @@ export function UpstreamSyncSettings() {
           </DialogHeader>
           <SyncGroupFormView
             syncGroupForm={syncGroupForm}
+            isNewAPITarget={
+              targets.find(
+                (target) => target.id === syncGroupForm.target_id,
+              )?.target_type === "newapi"
+            }
             sourceGroupsByChannel={sourceGroupsByChannel}
             targetGroups={targetGroups}
             targetProxies={targetProxies}
@@ -1879,196 +1973,72 @@ export function UpstreamSyncSettings() {
       </Dialog>
 
       <Dialog
-        open={autoGroupsDialogTarget != null}
+        open={sub2APIRemoteGroupsDialogTarget != null}
         onOpenChange={(open) => {
           if (!open) {
-            setAutoGroupsDialogTarget(null);
-            setAutoGroups([]);
-            setAutoGroupDragOver(null);
-            setAvailableAutoGroups([]);
-            setNewAutoGroup("");
+            setSub2APIRemoteGroupsDialogTarget(null);
+            setSub2APIRemoteGroups([]);
           }
         }}
       >
-        <DialogContent className="sm:max-w-xl">
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
-            <DialogTitle>自动分组顺序</DialogTitle>
+            <DialogTitle>远端分组</DialogTitle>
             <DialogDescription>
-              {autoGroupsDialogTarget
-                ? `${autoGroupsDialogTarget.name} 的 AutoGroups 按从上到下的顺序生效。`
+              {sub2APIRemoteGroupsDialogTarget
+                ? `${sub2APIRemoteGroupsDialogTarget.name} 的远端分组。拖动或使用上下箭头即可调整排序，并立即保存到远端。`
                 : ""}
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-3">
-            {availableAutoGroups.length > 0 ? (
-              <div className="space-y-2">
-                <Label>选择已有分组</Label>
-                <div className="grid max-h-36 grid-cols-1 gap-1 overflow-y-auto rounded-md border p-2 sm:grid-cols-2">
-                  {availableAutoGroups.map((group) => {
-                    const checked = autoGroups.includes(group);
-                    return (
-                      <label
-                        key={group}
-                        className="flex min-w-0 cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-muted/60"
-                      >
-                        <Checkbox
-                          checked={checked}
-                          disabled={autoGroupsLoading}
-                          onCheckedChange={(value) =>
-                            toggleAvailableAutoGroup(group, value === true)
-                          }
-                        />
-                        <span className="min-w-0 flex-1 truncate">{group}</span>
-                        {checked ? (
-                          <span className="text-xs tabular-nums text-muted-foreground">
-                            {autoGroups.indexOf(group) + 1}
-                          </span>
-                        ) : null}
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            ) : null}
-            <div className="flex gap-2">
-              <Input
-                value={newAutoGroup}
-                placeholder="输入分组名称"
-                disabled={autoGroupsLoading}
-                onChange={(e) => setNewAutoGroup(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    addAutoGroup();
-                  }
-                }}
-              />
-              <Button
-                type="button"
-                variant="outline"
-                onClick={addAutoGroup}
-                disabled={autoGroupsLoading}
-              >
-                <Plus className="size-4" />
-                添加
-              </Button>
-            </div>
-            <div className="max-h-72 space-y-2 overflow-y-auto rounded-md border p-2">
-              {autoGroupsLoading ? (
-                <p className="px-2 py-5 text-center text-sm text-muted-foreground">
-                  加载中...
-                </p>
-              ) : autoGroups.length === 0 ? (
-                <p className="px-2 py-5 text-center text-sm text-muted-foreground">
-                  尚未配置自动分组。
-                </p>
-              ) : (
-                autoGroups.map((group, index) => (
-                  <div
-                    key={group}
-                    onDragOver={(event) => {
-                      event.preventDefault();
-                      event.dataTransfer.dropEffect = "move";
-                      setAutoGroupDragOver(group);
-                    }}
-                    onDragLeave={() => {
-                      if (autoGroupDragOver === group)
-                        setAutoGroupDragOver(null);
-                    }}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      const fromGroup =
-                        event.dataTransfer.getData("text/plain");
-                      setAutoGroupDragOver(null);
-                      if (fromGroup) moveAutoGroupByName(fromGroup, group);
-                    }}
-                    className={cn(
-                      "flex items-center gap-2 rounded-md border bg-background px-2 py-1.5",
-                      autoGroupDragOver === group &&
-                        "border-primary/60 ring-1 ring-primary/25",
-                    )}
-                  >
-                    <Button
-                      type="button"
-                      size="icon"
-                      variant="ghost"
-                      className="size-7 shrink-0 cursor-grab touch-none active:cursor-grabbing"
-                      title="拖动调整优先级"
-                      draggable={!autoGroupsLoading}
-                      disabled={autoGroupsLoading || autoGroups.length < 2}
-                      onDragStart={(event) => {
-                        event.stopPropagation();
-                        event.dataTransfer.effectAllowed = "move";
-                        event.dataTransfer.setData("text/plain", group);
-                      }}
-                      onDragEnd={() => setAutoGroupDragOver(null)}
-                    >
-                      <GripVertical className="size-4 text-muted-foreground" />
-                      <span className="sr-only">拖动调整优先级</span>
-                    </Button>
-                    <span className="w-6 text-center text-xs tabular-nums text-muted-foreground">
-                      {index + 1}
-                    </span>
-                    <span className="min-w-0 flex-1 break-all text-sm">
-                      {group}
-                    </span>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="size-7"
-                      title="上移"
-                      disabled={index === 0}
-                      onClick={() => moveAutoGroup(index, -1)}
-                    >
-                      <ChevronUp className="size-4" />
-                      <span className="sr-only">上移</span>
-                    </Button>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="size-7"
-                      title="下移"
-                      disabled={index === autoGroups.length - 1}
-                      onClick={() => moveAutoGroup(index, 1)}
-                    >
-                      <ChevronDown className="size-4" />
-                      <span className="sr-only">下移</span>
-                    </Button>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="size-7 text-destructive hover:text-destructive"
-                      title="移除"
-                      onClick={() =>
-                        setAutoGroups((groups) =>
-                          groups.filter((_, i) => i !== index),
-                        )
-                      }
-                    >
-                      <Trash2 className="size-4" />
-                      <span className="sr-only">移除</span>
-                    </Button>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
+          {sub2APIRemoteGroupsLoading ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              加载中...
+            </p>
+          ) : sub2APIRemoteGroupsDialogTarget ? (
+            <RemoteGroupOrderList
+              target={sub2APIRemoteGroupsDialogTarget}
+              groups={sub2APIRemoteGroups}
+              busy={
+                busy ===
+                `group-order-${sub2APIRemoteGroupsDialogTarget.id}`
+              }
+              onReorder={(groups) =>
+                void reorderTargetGroups(
+                  sub2APIRemoteGroupsDialogTarget,
+                  groups,
+                )
+              }
+              defaultExpanded
+            />
+          ) : null}
           <DialogFooter>
             <Button
+              type="button"
               variant="outline"
-              onClick={() => setAutoGroupsDialogTarget(null)}
+              onClick={() => {
+                if (sub2APIRemoteGroupsDialogTarget) {
+                  void openRemoteGroupsDialog(
+                    sub2APIRemoteGroupsDialogTarget,
+                    true,
+                  );
+                }
+              }}
+              disabled={sub2APIRemoteGroupsLoading}
             >
-              取消
+              <RefreshCw
+                className={cn(
+                  "size-4",
+                  sub2APIRemoteGroupsLoading && "animate-spin",
+                )}
+              />
+              刷新
             </Button>
             <Button
-              onClick={saveAutoGroups}
-              disabled={
-                autoGroupsLoading ||
-                (autoGroupsDialogTarget != null &&
-                  busy === `auto-groups-${autoGroupsDialogTarget.id}`)
-              }
+              type="button"
+              variant="outline"
+              onClick={() => setSub2APIRemoteGroupsDialogTarget(null)}
             >
-              保存顺序
+              关闭
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -2241,20 +2211,23 @@ export function UpstreamSyncSettings() {
   );
 }
 
-function TargetGroupOrderList({
+function RemoteGroupOrderList({
   target,
   groups,
   busy,
   onReorder,
+  defaultExpanded = false,
 }: {
   target: UpstreamSyncTarget;
   groups: UpstreamSyncTargetGroup[];
   busy: boolean;
   onReorder: (groups: UpstreamSyncTargetGroup[]) => void;
+  defaultExpanded?: boolean;
 }) {
   const dragIDRef = useRef<number | null>(null);
   const [draggingID, setDraggingID] = useState<number | null>(null);
   const [dragOverID, setDragOverID] = useState<number | null>(null);
+  const [expanded, setExpanded] = useState(defaultExpanded);
 
   function moveGroup(fromID: number, toID: number) {
     if (fromID === toID) return;
@@ -2267,15 +2240,37 @@ function TargetGroupOrderList({
     onReorder(next);
   }
 
+  function moveGroupByIndex(index: number, direction: -1 | 1) {
+    const nextIndex = index + direction;
+    if (nextIndex < 0 || nextIndex >= groups.length) return;
+    moveGroup(groups[index].id, groups[nextIndex].id);
+  }
+
   return (
     <section className="mb-4 space-y-3 rounded-lg border border-border bg-muted/15 p-3">
-      <div className="space-y-1">
-        <p className="text-sm font-semibold text-foreground">上游分组排序</p>
-        <p className="text-xs text-muted-foreground">
-          拖动手柄调整 {target.name} 的远端分组排序顺序。
-        </p>
+      <div className="flex items-start justify-between gap-3">
+        <div className="space-y-1">
+          <p className="text-sm font-semibold text-foreground">上游分组排序</p>
+          <p className="text-xs text-muted-foreground">
+            拖动手柄调整 {target.name} 的远端分组排序顺序。
+          </p>
+        </div>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          title={expanded ? "收起分组排序" : "展开分组排序"}
+          aria-label={expanded ? "收起分组排序" : "展开分组排序"}
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          <ChevronDown
+            className={cn("size-4 transition-transform", !expanded && "-rotate-90")}
+          />
+          {expanded ? "\u6536\u8d77" : "\u5c55\u5f00"}
+        </Button>
       </div>
-      {groups.length === 0 ? (
+      {expanded && (groups.length === 0 ? (
         <p className="py-3 text-center text-sm text-muted-foreground">
           请先同步上游分组。
         </p>
@@ -2343,24 +2338,52 @@ function TargetGroupOrderList({
                 <span className="min-w-0 flex-1 truncate text-sm font-medium">
                   {group.name}
                 </span>
-                <Badge variant="outline" className="shrink-0 font-normal">
-                  {group.platform || "openai"}
-                </Badge>
+                {target.target_type === "sub2api" ? (
+                  <Badge variant="outline" className="shrink-0 font-normal">
+                    {group.platform || "openai"}
+                  </Badge>
+                ) : null}
                 <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
                   {formatRatio(group.ratio)}
                 </span>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="size-7"
+                  title="上移"
+                  disabled={busy || index === 0}
+                  onClick={() => moveGroupByIndex(index, -1)}
+                >
+                  <ChevronUp className="size-4" />
+                  <span className="sr-only">上移</span>
+                </Button>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="size-7"
+                  title="下移"
+                  disabled={busy || index === groups.length - 1}
+                  onClick={() => moveGroupByIndex(index, 1)}
+                >
+                  <ChevronDown className="size-4" />
+                  <span className="sr-only">下移</span>
+                </Button>
               </div>
             );
           })}
         </div>
-      )}
+      ))}
     </section>
   );
 }
 
 function SyncGroupList({
   syncGroups,
+  target,
   busy,
+  onReorder,
   onAdd,
   onRefresh,
   refreshBusy,
@@ -2371,7 +2394,9 @@ function SyncGroupList({
   onDelete,
 }: {
   syncGroups: UpstreamSyncGroup[];
+  target: UpstreamSyncTarget;
   busy: string | null;
+  onReorder: (groups: UpstreamSyncGroup[]) => void;
   onAdd: () => void;
   onRefresh: () => void;
   refreshBusy: boolean;
@@ -2381,6 +2406,29 @@ function SyncGroupList({
   onDeleteManaged: (syncGroup: UpstreamSyncGroup) => void;
   onDelete: (syncGroup: UpstreamSyncGroup) => void;
 }) {
+  const dragIDRef = useRef<number | null>(null);
+  const [draggingID, setDraggingID] = useState<number | null>(null);
+  const [dragOverID, setDragOverID] = useState<number | null>(null);
+
+  function moveGroup(fromID: number, toID: number) {
+    if (fromID === toID) return;
+    const fromIndex = syncGroups.findIndex((group) => group.id === fromID);
+    const toIndex = syncGroups.findIndex((group) => group.id === toID);
+    if (fromIndex < 0 || toIndex < 0) return;
+    const next = [...syncGroups];
+    const [item] = next.splice(fromIndex, 1);
+    next.splice(toIndex, 0, item);
+    onReorder(next);
+  }
+
+  function moveGroupByOffset(index: number, offset: -1 | 1) {
+    const nextIndex = index + offset;
+    if (nextIndex < 0 || nextIndex >= syncGroups.length) return;
+    const next = [...syncGroups];
+    [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+    onReorder(next);
+  }
+
   return (
     <div className="space-y-3">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -2409,15 +2457,42 @@ function SyncGroupList({
         </div>
       </div>
       {syncGroups.length === 0 ? (
-        <EmptyBox text="该 Sub2API 上游还没有同步分组。" />
+        <EmptyBox text="该上游还没有同步分组。" />
       ) : (
         <div className="space-y-3">
-          {syncGroups.map((syncGroup) => {
+          {syncGroups.map((syncGroup, index) => {
             const isApplying = busy === `apply-${syncGroup.id}`;
+            const orderingBusy = busy === `sync-group-order-${target.id}`;
+            const isDragging = draggingID === syncGroup.id;
+            const isDragOver = dragOverID === syncGroup.id && !isDragging;
             return (
               <div
                 key={syncGroup.id}
-                className="rounded-xl border border-border bg-background/80 p-3 sm:p-4"
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = "move";
+                  if (dragOverID !== syncGroup.id) setDragOverID(syncGroup.id);
+                }}
+                onDragLeave={() => {
+                  if (dragOverID === syncGroup.id) setDragOverID(null);
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  const fromID =
+                    dragIDRef.current ??
+                    Number(event.dataTransfer.getData("text/plain"));
+                  dragIDRef.current = null;
+                  setDraggingID(null);
+                  setDragOverID(null);
+                  if (Number.isFinite(fromID) && fromID > 0) {
+                    moveGroup(fromID, syncGroup.id);
+                  }
+                }}
+                className={cn(
+                  "rounded-xl border border-border bg-background/80 p-3 transition-colors sm:p-4",
+                  isDragging && "opacity-50",
+                  isDragOver && "border-primary/60 ring-1 ring-primary/25",
+                )}
               >
                 <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start">
                   <div className="min-w-0 space-y-1">
@@ -2514,6 +2589,56 @@ function SyncGroupList({
                     </DropdownMenu>
                   </div>
                 </div>
+                <div className="mt-3 flex items-center justify-end gap-1 border-t border-border/70 pt-2">
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    className="size-7 cursor-grab touch-none active:cursor-grabbing"
+                    title="拖动调整同步分组排序"
+                    draggable={!orderingBusy && syncGroups.length > 1}
+                    disabled={orderingBusy || syncGroups.length < 2}
+                    onDragStart={(event) => {
+                      event.stopPropagation();
+                      dragIDRef.current = syncGroup.id;
+                      setDraggingID(syncGroup.id);
+                      event.dataTransfer.effectAllowed = "move";
+                      event.dataTransfer.setData("text/plain", String(syncGroup.id));
+                    }}
+                    onDragEnd={() => {
+                      dragIDRef.current = null;
+                      setDraggingID(null);
+                      setDragOverID(null);
+                    }}
+                  >
+                    <GripVertical className="size-4 text-muted-foreground" />
+                    <span className="sr-only">拖动调整同步分组排序</span>
+                  </Button>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    className="size-7"
+                    title="上移同步分组"
+                    disabled={orderingBusy || index === 0}
+                    onClick={() => moveGroupByOffset(index, -1)}
+                  >
+                    <ChevronUp className="size-4" />
+                    <span className="sr-only">上移同步分组</span>
+                  </Button>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    className="size-7"
+                    title="下移同步分组"
+                    disabled={orderingBusy || index === syncGroups.length - 1}
+                    onClick={() => moveGroupByOffset(index, 1)}
+                  >
+                    <ChevronDown className="size-4" />
+                    <span className="sr-only">下移同步分组</span>
+                  </Button>
+                </div>
               </div>
             );
           })}
@@ -2525,6 +2650,7 @@ function SyncGroupList({
 
 function SyncGroupFormView({
   syncGroupForm,
+  isNewAPITarget,
   sourceGroupsByChannel,
   targetGroups,
   targetProxies,
@@ -2537,6 +2663,7 @@ function SyncGroupFormView({
   onLoadSourceGroups,
 }: {
   syncGroupForm: SyncGroupForm;
+  isNewAPITarget: boolean;
   sourceGroupsByChannel: Record<number, RateSnapshot[]>;
   targetGroups: UpstreamSyncTargetGroup[];
   targetProxies: UpstreamSyncTargetProxy[];
@@ -2553,14 +2680,20 @@ function SyncGroupFormView({
     return targetGroups
       .filter(
         (group) =>
+          isNewAPITarget ||
           normalizePlatform(group.platform) ===
-          normalizePlatform(syncGroupForm.platform),
+            normalizePlatform(syncGroupForm.platform),
       )
       .sort((a, b) => {
         const diff = (a.ratio - b.ratio) * direction;
         return diff === 0 ? a.id - b.id : diff;
       });
-  }, [targetGroups, syncGroupForm.platform, syncGroupForm.rate_sort_direction]);
+  }, [
+    isNewAPITarget,
+    targetGroups,
+    syncGroupForm.platform,
+    syncGroupForm.rate_sort_direction,
+  ]);
   const sortedAccountRows = useMemo(
     () =>
       sortSyncAccountRows(
@@ -2741,6 +2874,7 @@ function SyncGroupFormView({
                     ...prev,
                     platform: value,
                     target_group_ids: prev.target_group_ids.filter((id) => {
+                      if (isNewAPITarget) return true;
                       const group = targetGroups.find((item) => item.id === id);
                       return normalizePlatform(group?.platform) === value;
                     }),
@@ -2829,14 +2963,54 @@ function SyncGroupFormView({
           ) : null}
 
           <Field label="目标分组">
-            <div className="max-h-32 space-y-1 overflow-auto rounded-md border border-border bg-muted/20 p-2">
+            {isNewAPITarget ? (
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" className="h-9 w-full justify-between font-normal">
+                    <span className="truncate">
+                      {filteredTargetGroups
+                        .filter((group) => syncGroupForm.target_group_ids.includes(group.id))
+                        .map((group) => group.name)
+                        .join(", ") || "选择 New API 用户组"}
+                    </span>
+                    <ChevronsUpDown className="ml-2 size-3.5 shrink-0 opacity-50" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0" align="start">
+                  <Command>
+                    <CommandInput placeholder="搜索用户组" />
+                    <CommandList>
+                      <CommandEmpty>暂无可选用户组</CommandEmpty>
+                      <CommandGroup>
+                        {filteredTargetGroups.map((group) => {
+                          const checked = syncGroupForm.target_group_ids.includes(group.id);
+                          return (
+                            <CommandItem
+                              key={group.id}
+                              value={group.name}
+                              onSelect={() => onToggleTargetGroup(group.id, !checked)}
+                            >
+                              <Check className={cn("mr-2 size-4", checked ? "opacity-100" : "opacity-0")} />
+                              <span className="truncate">{group.name}</span>
+                            </CommandItem>
+                          );
+                        })}
+                      </CommandGroup>
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
+            ) : null}
+            {!isNewAPITarget ? <div className="max-h-32 space-y-1 overflow-auto rounded-md border border-border bg-muted/20 p-2">
               {targetGroups.length === 0 ? (
                 <p className="text-xs text-muted-foreground">
                   请先同步目标分组。
                 </p>
               ) : filteredTargetGroups.length === 0 ? (
                 <p className="text-xs text-muted-foreground">
-                  当前平台没有可选目标分组。
+                  {isNewAPITarget
+                    ? "暂无可选目标分组。"
+                    : "当前平台没有可选目标分组。"}
                 </p>
               ) : (
                 filteredTargetGroups.map((group) => (
@@ -2853,17 +3027,19 @@ function SyncGroupFormView({
                       }
                     />
                     <span className="min-w-0 flex-1 truncate">
-                      {group.name} · {platformLabel(group.platform)} · 远端 ID{" "}
+                      {group.name}
+                      {!isNewAPITarget ? ` · ${platformLabel(group.platform)}` : ""}
+                      {" · 远端 ID "}
                       {group.remote_group_id} · 倍率 {formatRatio(group.ratio)}
                     </span>
                     <StatusBadge status={group.status || "active"} />
                   </label>
                 ))
               )}
-            </div>
+            </div> : null}
           </Field>
 
-          <div className="grid gap-2 md:grid-cols-4">
+            <div className="grid gap-2 md:grid-cols-4">
             <CompactSwitchLine
               id="sync-group-cron-enabled"
               label="Cron 自动应用"
@@ -2872,15 +3048,15 @@ function SyncGroupFormView({
                 onChange((prev) => ({ ...prev, enabled: checked }))
               }
             />
-            <CompactSwitchLine
+            {!isNewAPITarget ? <CompactSwitchLine
               id="pool-mode"
               label="池模式"
               checked={syncGroupForm.pool_mode_enabled}
               onCheckedChange={(checked) =>
                 onChange((prev) => ({ ...prev, pool_mode_enabled: checked }))
               }
-            />
-            <CompactSwitchLine
+            /> : null}
+            {!isNewAPITarget ? <CompactSwitchLine
               id="custom-errors"
               label="自定义错误码"
               checked={syncGroupForm.custom_error_codes_enabled}
@@ -2890,8 +3066,8 @@ function SyncGroupFormView({
                   custom_error_codes_enabled: checked,
                 }))
               }
-            />
-            <div className="flex h-9 items-center justify-between gap-3 rounded-md border border-border bg-background/90 px-3">
+            /> : null}
+              <div className="flex h-9 items-center justify-between gap-3 rounded-md border border-border bg-background/90 px-3">
               <Label className="text-xs font-medium text-foreground">
                 同步功能
               </Label>
@@ -2915,14 +3091,17 @@ function SyncGroupFormView({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="account">同步账号</SelectItem>
-                  <SelectItem value="gateway_rate">倍率同步</SelectItem>
+                  <SelectItem value="gateway_rate">
+                    {isNewAPITarget ? "网关上游同步" : "倍率同步"}
+                  </SelectItem>
                 </SelectContent>
               </Select>
+              </div>
             </div>
-          </div>
 
-          {syncGroupForm.pool_mode_enabled ||
-          syncGroupForm.custom_error_codes_enabled ? (
+          {!isNewAPITarget &&
+          (syncGroupForm.pool_mode_enabled ||
+            syncGroupForm.custom_error_codes_enabled) ? (
             <div className="grid gap-3 md:grid-cols-3">
               {syncGroupForm.pool_mode_enabled ? (
                 <>
@@ -3003,10 +3182,12 @@ function SyncGroupFormView({
                   <TableHead className="min-w-28">倍率换算</TableHead>
                   <TableHead className="min-w-32">账号计费倍率</TableHead>
                   <TableHead className="min-w-28">权重/负载</TableHead>
-                  <TableHead className="min-w-24">并发</TableHead>
-                  <TableHead className="min-w-32">代理</TableHead>
+                  {isNewAPITarget ? <TableHead className="min-w-28">优先级</TableHead> : <TableHead className="min-w-24">并发</TableHead>}
+                  {!isNewAPITarget ? (
+                    <TableHead className="min-w-32">代理</TableHead>
+                  ) : null}
                   <TableHead className="min-w-24">状态</TableHead>
-                  <TableHead className="min-w-56">
+                  {!isNewAPITarget ? <TableHead className="min-w-56">
                     <span className="flex items-center gap-1">
                       测试模型
                       <Tooltip delayDuration={150}>
@@ -3025,7 +3206,7 @@ function SyncGroupFormView({
                         </TooltipContent>
                       </Tooltip>
                     </span>
-                  </TableHead>
+                  </TableHead> : null}
                   <TableHead className="w-12" />
                 </TableRow>
               </TableHeader>
@@ -3206,7 +3387,19 @@ function SyncGroupFormView({
                           }
                         />
                       </TableCell>
-                      <TableCell>
+                      {isNewAPITarget ? (
+                        <TableCell>
+                          <Input
+                            className="w-24"
+                            type="number"
+                            min="0"
+                            value={String(account.priority)}
+                            onChange={(e) =>
+                              updateAccount(index, { priority: num(e.target.value) })
+                            }
+                          />
+                        </TableCell>
+                      ) : <TableCell>
                         <Input
                           className="w-24"
                           type="number"
@@ -3217,7 +3410,8 @@ function SyncGroupFormView({
                             })
                           }
                         />
-                      </TableCell>
+                      </TableCell>}
+                      {!isNewAPITarget ? (
                       <TableCell>
                         <Select
                           value={account.proxy_id || "none"}
@@ -3252,6 +3446,7 @@ function SyncGroupFormView({
                           </SelectContent>
                         </Select>
                       </TableCell>
+                      ) : null}
                       <TableCell>
                         <Select
                           value={account.enabled ? "enabled" : "disabled"}
@@ -3270,7 +3465,7 @@ function SyncGroupFormView({
                           </SelectContent>
                         </Select>
                       </TableCell>
-                      <TableCell>
+                      {!isNewAPITarget ? <TableCell>
                         <TestModelPicker
                           enabled={account.test_enabled}
                           value={selectedTestModel}
@@ -3283,7 +3478,7 @@ function SyncGroupFormView({
                             })
                           }
                         />
-                      </TableCell>
+                      </TableCell> : null}
                       <TableCell>
                         <Button
                           size="icon-sm"
@@ -3308,6 +3503,7 @@ function SyncGroupFormView({
         <GatewayRateSyncCard
           syncGroupForm={syncGroupForm}
           onChange={onChange}
+          isNewAPITarget={isNewAPITarget}
         />
       ) : null}
 
@@ -3334,14 +3530,16 @@ function SyncGroupFormView({
 function GatewayRateSyncCard({
   syncGroupForm,
   onChange,
+  isNewAPITarget,
 }: {
   syncGroupForm: SyncGroupForm;
   onChange: React.Dispatch<React.SetStateAction<SyncGroupForm>>;
+  isNewAPITarget: boolean;
 }) {
-  const [gatewayGroups, setGatewayGroups] = useState<GatewayGroup[]>([]);
-  const [gatewayRoutes, setGatewayRoutes] = useState<GatewayRoute[]>([]);
-  const [groupsLoading, setGroupsLoading] = useState(false);
-  const [routesLoading, setRoutesLoading] = useState(false);
+	const [gatewayGroups, setGatewayGroups] = useState<GatewayGroup[]>([]);
+	const [groupsLoading, setGroupsLoading] = useState(false);
+	const [rateStatus, setRateStatus] = useState<GatewayRateSyncStatus | null>(null);
+	const [rateStatusLoading, setRateStatusLoading] = useState(false);
   const rateSync = syncGroupForm.gateway_rate_sync;
   const gatewayGroupID = Number(rateSync?.gateway_group_id || 0);
 
@@ -3374,41 +3572,35 @@ function GatewayRateSyncCard({
   }, []);
 
   useEffect(() => {
-    if (!gatewayGroupID) {
-      setGatewayRoutes([]);
-      return;
-    }
-    let cancelled = false;
-    setRoutesLoading(true);
-    apiFetch<{ items: GatewayRoute[] }>(
-      `/gateway/groups/${gatewayGroupID}/routes`,
-    )
-      .then((res) => {
-        if (!cancelled) setGatewayRoutes(res.items ?? []);
-      })
+	if (!gatewayGroupID) {
+	  setRateStatus(null);
+	  return;
+	}
+	let cancelled = false;
+	setRateStatusLoading(true);
+	apiFetch<GatewayRateSyncStatus>(
+	  `/gateway/groups/${gatewayGroupID}/rate-sync-status`,
+	)
+	  .then((res) => {
+		if (!cancelled) setRateStatus(res);
+	  })
       .catch((err) => {
         if (!cancelled) {
-          toast.error(err instanceof Error ? err.message : "加载网关路由失败");
+		  toast.error(err instanceof Error ? err.message : "加载网关倍率状态失败");
         }
       })
       .finally(() => {
-        if (!cancelled) setRoutesLoading(false);
+		if (!cancelled) setRateStatusLoading(false);
       });
     return () => {
       cancelled = true;
     };
   }, [gatewayGroupID]);
 
-  const rateRange = useMemo(() => {
-    const rates = gatewayRoutes
-      .filter((route) => route.enabled && route.billing_rate_multiplier > 0)
-      .map((route) => route.billing_rate_multiplier)
-      .sort((a, b) => a - b);
-    return {
-      min: rates[0] ?? 0,
-      max: rates[rates.length - 1] ?? 0,
-    };
-  }, [gatewayRoutes]);
+	const rateRange = {
+	  min: rateStatus?.min_rate ?? 0,
+	  max: rateStatus?.max_rate ?? 0,
+	};
 
   function setRateSync(patch: Partial<SyncAccountForm>) {
     onChange((prev) => ({
@@ -3439,7 +3631,9 @@ function GatewayRateSyncCard({
   return (
     <section className="rounded-xl border border-border bg-background/80 p-3 sm:p-4">
       <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <p className="text-sm font-semibold text-foreground">倍率同步</p>
+        <p className="text-sm font-semibold text-foreground">
+          {isNewAPITarget ? "网关上游同步" : "倍率同步"}
+        </p>
       </div>
 
       {rateSync ? (
@@ -3455,7 +3649,7 @@ function GatewayRateSyncCard({
                 <TableHead className="min-w-56">倍率限制</TableHead>
                 <TableHead className="min-w-44">分组倍率变量</TableHead>
                 <TableHead className="min-w-28">权重/负载</TableHead>
-                <TableHead className="min-w-24">并发</TableHead>
+                <TableHead className="min-w-24">{isNewAPITarget ? "优先级" : "并发"}</TableHead>
                 <TableHead className="min-w-24">状态</TableHead>
               </TableRow>
             </TableHeader>
@@ -3510,9 +3704,9 @@ function GatewayRateSyncCard({
                 </TableCell>
                 <TableCell>
                   <span className="whitespace-nowrap font-mono text-sm tabular-nums">
-                    {routesLoading
-                      ? "加载中..."
-                      : `${formatRate(rateRange.max)} / ${formatRate(rateRange.min)}`}
+					{rateStatusLoading
+					  ? "加载中..."
+					  : `${formatRate(rateRange.max)} / ${formatRate(rateRange.min)}`}
                   </span>
                 </TableCell>
                 <TableCell>
@@ -3625,9 +3819,13 @@ function GatewayRateSyncCard({
                   <Input
                     className="w-24"
                     type="number"
-                    value={String(rateSync.concurrency)}
+                    value={String(isNewAPITarget ? rateSync.priority : rateSync.concurrency)}
                     onChange={(e) =>
-                      setRateSync({ concurrency: num(e.target.value) })
+                      setRateSync(
+                        isNewAPITarget
+                          ? { priority: num(e.target.value) }
+                          : { concurrency: num(e.target.value) },
+                      )
                     }
                   />
                 </TableCell>
@@ -3650,9 +3848,14 @@ function GatewayRateSyncCard({
               </TableRow>
             </TableBody>
           </Table>
-        </div>
-      ) : null}
-    </section>
+		</div>
+	  ) : null}
+	  {gatewayGroupID && !rateStatusLoading && rateStatus && !rateStatus.ready ? (
+		<p className="mt-3 text-xs text-destructive">
+		  {gatewayRateSyncStatusMessage(rateStatus)}
+		</p>
+	  ) : null}
+	</section>
   );
 }
 

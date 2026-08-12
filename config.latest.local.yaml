@@ -1,0 +1,11 @@
+server:
+  port: 8419
+  mode: debug
+  baseURL: http://127.0.0.1:8419
+database:
+  driver: sqlite
+  path: D:\code\upstream-ops\data\upstream-ops-local.db
+security:
+  appSecret: local-dev-secret-change-me-please-32bytes
+auth:
+  enabled: false

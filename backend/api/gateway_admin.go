@@ -35,6 +35,7 @@ func registerGatewayAdmin(g *gin.RouterGroup, d *Deps) {
 
 		// routes under group
 		gp.GET("/groups/:id/routes", func(c *gin.Context) { listGatewayGroupRoutes(c, d) })
+		gp.GET("/groups/:id/rate-sync-status", func(c *gin.Context) { getGatewayGroupRateSyncStatus(c, d) })
 		gp.PUT("/groups/:id/routes", func(c *gin.Context) { saveGatewayGroupRoutes(c, d) })
 		gp.POST("/groups/:id/routes/ensure-keys", func(c *gin.Context) { ensureGatewayGroupRouteKeys(c, d) })
 
@@ -313,6 +314,20 @@ func listGatewayGroupRoutes(c *gin.Context, d *Deps) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"items": list})
+}
+
+func getGatewayGroupRateSyncStatus(c *gin.Context, d *Deps) {
+	id, err := parseUintParam(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	status, err := d.Gateway.GetRateSyncStatus(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, status)
 }
 
 func saveGatewayGroupRoutes(c *gin.Context, d *Deps) {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/lzy98276/upstream-ops/backend/connector"
+	"github.com/lzy98276/upstream-ops/backend/connector/newapi"
 	"github.com/lzy98276/upstream-ops/backend/connector/sub2api"
 	"github.com/lzy98276/upstream-ops/backend/crypto"
 	"github.com/lzy98276/upstream-ops/backend/gateway"
@@ -33,6 +35,10 @@ type channelSvc interface {
 	ListAPIKeys(ctx context.Context, channelID uint, query connector.APIKeyQuery) (*connector.APIKeyPage, error)
 	ListAPIKeyGroups(ctx context.Context, channelID uint) ([]connector.APIKeyGroup, error)
 }
+
+// ErrInvalidTargetGroupOrder means the client submitted a stale, incomplete,
+// or duplicate remote-group order. Callers can return it as a client error.
+var ErrInvalidTargetGroupOrder = errors.New("ordered_ids must include each current remote group exactly once")
 
 type Service struct {
 	channels   *storage.Channels
@@ -123,11 +129,13 @@ type TargetProxyDTO struct {
 
 type SyncGroupDTO struct {
 	ID                       uint             `json:"id"`
+	Sort                     int              `json:"sort"`
 	DisplayName              string           `json:"display_name"`
 	NameTemplate             string           `json:"name_template"`
 	Name                     string           `json:"name"`
 	TargetID                 uint             `json:"target_id"`
 	TargetGroupIDs           []uint           `json:"target_group_ids"`
+	SyncMode                 string           `json:"sync_mode"`
 	Platform                 string           `json:"platform"`
 	ModelLimitsMode          string           `json:"model_limits_mode"`
 	ModelLimits              string           `json:"model_limits,omitempty"`
@@ -157,6 +165,7 @@ type SyncAccountDTO struct {
 	ProxyID          *int64  `json:"proxy_id,omitempty"`
 	Concurrency      int     `json:"concurrency"`
 	Weight           int     `json:"weight"`
+	Priority         int64   `json:"priority"`
 	RateConvertMode  string  `json:"rate_convert_mode"`
 	RateConvertValue float64 `json:"rate_convert_value"`
 	Enabled          bool    `json:"enabled"`
@@ -344,12 +353,12 @@ func (s *Service) SyncTargetGroups(ctx context.Context, targetID uint) ([]Target
 	if err != nil {
 		return nil, err
 	}
-	if normalizeTargetType(target.TargetType) != "sub2api" {
-		return nil, errors.New("target group sync is only supported for Sub2API targets")
-	}
 	plain, err := s.cipher.Decrypt(target.AdminAPIKeyCipher)
 	if err != nil {
 		return nil, err
+	}
+	if normalizeTargetType(target.TargetType) == "newapi" {
+		return s.syncNewAPITargetGroups(ctx, target, plain)
 	}
 	client := sub2api.NewAdminClient()
 	groups, err := client.ListGroups(ctx, sub2api.AdminTarget{BaseURL: target.BaseURL, APIKey: plain}, true)
@@ -387,21 +396,107 @@ func (s *Service) SyncTargetGroups(ctx context.Context, targetID uint) ([]Target
 	return out, nil
 }
 
-// ReorderSub2APIGroups updates the remote Sub2API group sort order and returns
-// the refreshed local cache in the same order.
-func (s *Service) ReorderSub2APIGroups(ctx context.Context, targetID uint, orderedIDs []int64) ([]TargetGroupDTO, error) {
-	target, err := s.targets.FindByID(targetID)
+// syncNewAPITargetGroups turns New API's administrator option maps into the
+// same local group cache used by the common synchronization-group editor.
+// New API groups do not have server-issued numeric IDs, so a stable FNV hash
+// of their name is used only as the cache's remote-group identifier.
+func (s *Service) syncNewAPITargetGroups(ctx context.Context, target *storage.UpstreamSyncTarget, apiKey string) ([]TargetGroupDTO, error) {
+	settings, err := s.getNewAPIGroupSettings(ctx, target.BaseURL, apiKey)
+	if err != nil {
+		s.recordTargetCheck(target.ID, err)
+		return nil, err
+	}
+	return s.cacheNewAPITargetGroups(target, settings)
+}
+
+// cacheNewAPITargetGroups stores a New API option snapshot without issuing a
+// second remote request. This lets sort operations validate against the live
+// snapshot once, then return an updated local list immediately after writing.
+func (s *Service) cacheNewAPITargetGroups(target *storage.UpstreamSyncTarget, settings *newAPIGroupSettings) ([]TargetGroupDTO, error) {
+	groups := newAPIRemoteGroups(settings)
+	existingGroups, err := s.groups.ListByTarget(target.ID, true)
 	if err != nil {
 		return nil, err
 	}
-	if normalizeTargetType(target.TargetType) != "sub2api" {
-		return nil, errors.New("group ordering is only supported for Sub2API targets")
+	existingByName := make(map[string]*storage.UpstreamSyncTargetGroup, len(existingGroups))
+	for index := range existingGroups {
+		existingByName[existingGroups[index].Name] = &existingGroups[index]
+	}
+
+	seen := make([]int64, 0, len(groups))
+	out := make([]TargetGroupDTO, 0, len(groups))
+	now := time.Now()
+	for index, group := range groups {
+		remoteID := newAPIGroupRemoteID(group.Name)
+		seen = append(seen, remoteID)
+		item, findErr := s.groups.FindByTargetAndRemote(target.ID, remoteID)
+		if findErr != nil {
+			// Versions before the JavaScript-safe ID fix stored full 63-bit
+			// hashes. Reuse the local row by name so existing sync-group links
+			// keep working while its external ID is migrated.
+			item = existingByName[group.Name]
+			if item == nil {
+				item = &storage.UpstreamSyncTargetGroup{TargetID: target.ID, RemoteGroupID: remoteID}
+			} else if item.RemoteGroupID != remoteID {
+				if err := s.groups.UpdateRemoteGroupID(item.ID, target.ID, remoteID); err != nil {
+					return nil, err
+				}
+				item.RemoteGroupID = remoteID
+			}
+		}
+		item.TargetID = target.ID
+		item.RemoteGroupID = remoteID
+		item.Name = group.Name
+		// New API groups are shared by every protocol. Platform remains a
+		// synchronization-channel setting and must not constrain group selection.
+		item.Platform = ""
+		item.Ratio = group.Ratio
+		item.Sort = index + 1
+		item.Description = group.Description
+		item.Status = "active"
+		item.LastSyncAt = &now
+		if err := s.groups.Upsert(item); err != nil {
+			return nil, err
+		}
+		out = append(out, s.toGroupDTO(item))
+	}
+	if err := s.groups.DeleteMissing(target.ID, seen); err != nil {
+		return nil, err
+	}
+	s.recordTargetCheck(target.ID, nil)
+	return out, nil
+}
+
+func newAPIGroupRemoteID(name string) int64 {
+	// TargetGroupDTO is consumed by the browser as a JSON number. Keep the
+	// synthetic ID within Number.MAX_SAFE_INTEGER so drag-sort round-trips it
+	// without precision loss in JavaScript.
+	const maxSafeInteger uint64 = 9007199254740991
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(strings.ToLower(strings.TrimSpace(name))))
+	id := h.Sum64() % maxSafeInteger
+	if id == 0 {
+		id = 1
+	}
+	return int64(id)
+}
+
+// ReorderTargetGroups persists remote group order for either supported target.
+// Sub2API has a dedicated sort-order endpoint. New API's remote order is the
+// member order of its GroupRatio option.
+func (s *Service) ReorderTargetGroups(ctx context.Context, targetID uint, orderedIDs []int64) ([]TargetGroupDTO, error) {
+	target, err := s.targets.FindByID(targetID)
+	if err != nil {
+		return nil, err
 	}
 	plain, err := s.cipher.Decrypt(target.AdminAPIKeyCipher)
 	if err != nil {
 		return nil, err
 	}
 	orderedIDs = compactPositiveIDs(orderedIDs)
+	if normalizeTargetType(target.TargetType) == "newapi" {
+		return s.reorderNewAPITargetGroups(ctx, target, plain, orderedIDs)
+	}
 	client := sub2api.NewAdminClient()
 	remoteGroups, err := client.ListGroups(ctx, sub2api.AdminTarget{BaseURL: target.BaseURL, APIKey: plain}, true)
 	if err != nil {
@@ -413,7 +508,7 @@ func (s *Service) ReorderSub2APIGroups(ctx context.Context, targetID uint, order
 		remoteIDs = append(remoteIDs, group.ID)
 	}
 	if !samePositiveIDSet(orderedIDs, remoteIDs) {
-		return nil, errors.New("ordered_ids must include each current remote group exactly once")
+		return nil, ErrInvalidTargetGroupOrder
 	}
 	if err := client.UpdateGroupSortOrders(ctx, sub2api.AdminTarget{BaseURL: target.BaseURL, APIKey: plain}, orderedIDs); err != nil {
 		s.recordTargetCheck(targetID, err)
@@ -423,6 +518,113 @@ func (s *Service) ReorderSub2APIGroups(ctx context.Context, targetID uint, order
 		return nil, err
 	}
 	return s.ListTargetGroups(targetID, true)
+}
+
+func (s *Service) reorderNewAPITargetGroups(ctx context.Context, target *storage.UpstreamSyncTarget, apiKey string, orderedIDs []int64) ([]TargetGroupDTO, error) {
+	// Validate the browser's list against the live GroupRatio snapshot. A stale
+	// browser must not overwrite a group created remotely after the dialog was
+	// opened. The snapshot is then reused to update the local cache so sorting
+	// does not issue the old, redundant post-write GET request.
+	settings, err := s.getNewAPIGroupSettings(ctx, target.BaseURL, apiKey)
+	if err != nil {
+		s.recordTargetCheck(target.ID, err)
+		return nil, err
+	}
+	remoteGroups := newAPIRemoteGroups(settings)
+	remoteIDs := make([]int64, 0, len(remoteGroups))
+	nameByID := make(map[int64]string, len(remoteGroups))
+	for _, group := range remoteGroups {
+		id := newAPIGroupRemoteID(group.Name)
+		remoteIDs = append(remoteIDs, id)
+		nameByID[id] = group.Name
+	}
+	if !samePositiveIDSet(orderedIDs, remoteIDs) {
+		return nil, ErrInvalidTargetGroupOrder
+	}
+
+	// `auto` is a real visible remote group. It participates in GroupRatio's
+	// order, but AutoGroups is a separate routing configuration and must not be
+	// changed merely because the displayed group list was reordered.
+	groupOrder := make([]string, 0, len(orderedIDs))
+	for _, id := range orderedIDs {
+		groupOrder = append(groupOrder, nameByID[id])
+	}
+	ratioValue, err := marshalNewAPIGroupRatios(settings.GroupRatios, groupOrder)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.putNewAPIOption(ctx, target.BaseURL, apiKey, "GroupRatio", string(ratioValue)); err != nil {
+		s.recordTargetCheck(target.ID, err)
+		return nil, err
+	}
+
+	if _, err := s.cacheNewAPITargetGroups(target, settings); err != nil {
+		return nil, err
+	}
+	cachedGroups, err := s.groups.ListByTarget(target.ID, false)
+	if err != nil {
+		return nil, err
+	}
+	groupByID := make(map[int64]*storage.UpstreamSyncTargetGroup, len(cachedGroups))
+	for index := range cachedGroups {
+		groupByID[cachedGroups[index].RemoteGroupID] = &cachedGroups[index]
+	}
+	now := time.Now()
+	for index, id := range orderedIDs {
+		group := groupByID[id]
+		group.Sort = index + 1
+		group.LastSyncAt = &now
+		if err := s.groups.Upsert(group); err != nil {
+			return nil, err
+		}
+	}
+	s.recordTargetCheck(target.ID, nil)
+	return s.ListTargetGroups(target.ID, true)
+}
+
+func marshalNewAPIGroupRatios(ratios map[string]float64, order []string) ([]byte, error) {
+	keys := make([]string, 0, len(ratios))
+	seen := make(map[string]struct{}, len(ratios))
+	for _, name := range order {
+		if _, ok := ratios[name]; ok {
+			keys = append(keys, name)
+			seen[name] = struct{}{}
+		}
+	}
+	missing := make([]string, 0)
+	for name := range ratios {
+		if _, ok := seen[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+	sort.Slice(missing, func(i, j int) bool { return strings.ToLower(missing[i]) < strings.ToLower(missing[j]) })
+	keys = append(keys, missing...)
+	var out strings.Builder
+	out.WriteByte('{')
+	for i, name := range keys {
+		if i > 0 {
+			out.WriteByte(',')
+		}
+		encodedName, err := json.Marshal(name)
+		if err != nil {
+			return nil, err
+		}
+		encodedRatio, err := json.Marshal(ratios[name])
+		if err != nil {
+			return nil, err
+		}
+		out.Write(encodedName)
+		out.WriteByte(':')
+		out.Write(encodedRatio)
+	}
+	out.WriteByte('}')
+	return []byte(out.String()), nil
+}
+
+// ReorderSub2APIGroups remains as a compatibility alias for callers compiled
+// against the previous service method.
+func (s *Service) ReorderSub2APIGroups(ctx context.Context, targetID uint, orderedIDs []int64) ([]TargetGroupDTO, error) {
+	return s.ReorderTargetGroups(ctx, targetID, orderedIDs)
 }
 
 func compactPositiveIDs(ids []int64) []int64 {
@@ -601,18 +803,12 @@ func validateTargetInput(in TargetInput, creating bool) error {
 	return nil
 }
 
-func (s *Service) requireSub2APITarget(targetID uint) error {
+func (s *Service) requireSyncTarget(targetID uint) error {
 	if targetID == 0 {
 		return errors.New("target_id is required")
 	}
-	target, err := s.targets.FindByID(targetID)
-	if err != nil {
-		return err
-	}
-	if normalizeTargetType(target.TargetType) != "sub2api" {
-		return errors.New("sync groups are only supported for Sub2API targets")
-	}
-	return nil
+	_, err := s.targets.FindByID(targetID)
+	return err
 }
 
 func (s *Service) newAPITargetCredential(targetID uint) (*storage.UpstreamSyncTarget, string, error) {
@@ -645,10 +841,13 @@ type newAPIGroupSettings struct {
 	AutoGroups       []string
 	AvailableGroups  []string
 	Groups           []NewAPIGroupDTO
+	GroupOrder       []string
 	GroupRatios      map[string]float64
 	UserUsableGroups map[string]string
 	TopupGroupRatios map[string]json.RawMessage
 }
+
+const newAPIOptionTimeout = 30 * time.Second
 
 // getNewAPIGroupSettings reads AutoGroups along with the groups already
 // configured in New API's administrator settings. GroupRatio is the source of
@@ -661,7 +860,7 @@ func (s *Service) getNewAPIGroupSettings(ctx context.Context, baseURL, apiKey st
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: newAPIOptionTimeout}).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -701,9 +900,12 @@ func (s *Service) getNewAPIGroupSettings(ctx context.Context, baseURL, apiKey st
 			}
 			settings.AutoGroups = normalizeAutoGroups(groups)
 		case "GroupRatio":
-			if err := json.Unmarshal([]byte(option.Value), &settings.GroupRatios); err != nil {
+			ratios, order, err := decodeNewAPIGroupRatios(option.Value)
+			if err != nil {
 				return nil, fmt.Errorf("decode New API GroupRatio: %w", err)
 			}
+			settings.GroupRatios = ratios
+			settings.GroupOrder = order
 			for group := range settings.GroupRatios {
 				availableSet[group] = struct{}{}
 			}
@@ -728,17 +930,12 @@ func (s *Service) getNewAPIGroupSettings(ctx context.Context, baseURL, apiKey st
 	}
 	settings.AvailableGroups = sortedGroupNames(availableSet)
 	settings.Groups = make([]NewAPIGroupDTO, 0, len(settings.GroupRatios))
-	for name, ratio := range settings.GroupRatios {
-		if strings.EqualFold(name, "auto") {
-			continue
+	for _, group := range newAPIRemoteGroups(settings) {
+		if !strings.EqualFold(group.Name, "auto") {
+			settings.Groups = append(settings.Groups, group)
 		}
-		settings.Groups = append(settings.Groups, NewAPIGroupDTO{
-			Name:        name,
-			Ratio:       ratio,
-			Description: settings.UserUsableGroups[name],
-		})
 	}
-	sort.Slice(settings.Groups, func(i, j int) bool {
+	sort.SliceStable(settings.Groups, func(i, j int) bool {
 		return strings.ToLower(settings.Groups[i].Name) < strings.ToLower(settings.Groups[j].Name)
 	})
 	return settings, nil
@@ -773,6 +970,66 @@ func sortedGroupNames(groups map[string]struct{}) []string {
 	return result
 }
 
+func decodeNewAPIGroupRatios(raw string) (map[string]float64, []string, error) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, nil, err
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '{' {
+		return nil, nil, errors.New("expected group ratio object")
+	}
+	ratios := make(map[string]float64)
+	order := make([]string, 0)
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, nil, err
+		}
+		name, ok := token.(string)
+		if !ok {
+			return nil, nil, errors.New("expected group name")
+		}
+		var ratio float64
+		if err := decoder.Decode(&ratio); err != nil {
+			return nil, nil, err
+		}
+		ratios[name] = ratio
+		order = append(order, name)
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, nil, err
+	}
+	return ratios, order, nil
+}
+
+func newAPIRemoteGroups(settings *newAPIGroupSettings) []NewAPIGroupDTO {
+	if settings == nil {
+		return nil
+	}
+	groups := make([]NewAPIGroupDTO, 0, len(settings.GroupRatios))
+	seen := make(map[string]struct{}, len(settings.GroupRatios))
+	for _, name := range settings.GroupOrder {
+		ratio, ok := settings.GroupRatios[name]
+		if !ok || strings.TrimSpace(name) == "" {
+			continue
+		}
+		groups = append(groups, NewAPIGroupDTO{Name: name, Ratio: ratio, Description: settings.UserUsableGroups[name]})
+		seen[name] = struct{}{}
+	}
+	missing := make([]string, 0)
+	for name := range settings.GroupRatios {
+		if _, ok := seen[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+	sort.Slice(missing, func(i, j int) bool { return strings.ToLower(missing[i]) < strings.ToLower(missing[j]) })
+	for _, name := range missing {
+		groups = append(groups, NewAPIGroupDTO{Name: name, Ratio: settings.GroupRatios[name], Description: settings.UserUsableGroups[name]})
+	}
+	return groups
+}
+
 func (s *Service) putNewAPIAutoGroups(ctx context.Context, baseURL, apiKey string, groups []string) error {
 	value, err := json.Marshal(groups)
 	if err != nil {
@@ -785,7 +1042,7 @@ func (s *Service) putNewAPIGroupSettings(ctx context.Context, baseURL, apiKey st
 	if settings == nil {
 		return errors.New("New API group settings are required")
 	}
-	groupRatios, err := json.Marshal(settings.GroupRatios)
+	groupRatios, err := marshalNewAPIGroupRatios(settings.GroupRatios, settings.GroupOrder)
 	if err != nil {
 		return err
 	}
@@ -829,7 +1086,7 @@ func (s *Service) putNewAPIOption(ctx context.Context, baseURL, apiKey, key, val
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: newAPIOptionTimeout}).Do(req)
 	if err != nil {
 		return err
 	}
@@ -906,6 +1163,9 @@ func (s *Service) ListTargetProxies(ctx context.Context, targetID uint) ([]Targe
 	if err != nil {
 		return nil, err
 	}
+	if normalizeTargetType(target.TargetType) != "sub2api" {
+		return []TargetProxyDTO{}, nil
+	}
 	plain, err := s.cipher.Decrypt(target.AdminAPIKeyCipher)
 	if err != nil {
 		return nil, err
@@ -979,12 +1239,26 @@ func (s *Service) ListSyncGroups() ([]SyncGroupDTO, error) {
 	return out, nil
 }
 
+// ReorderSyncGroups persists the display order for one upstream target. This
+// applies equally to Sub2API and New API targets because the ordering belongs
+// to the local synchronization-group configuration.
+func (s *Service) ReorderSyncGroups(targetID uint, ids []uint) ([]SyncGroupDTO, error) {
+	if err := s.requireSyncTarget(targetID); err != nil {
+		return nil, err
+	}
+	if err := s.syncGroups.Reorder(targetID, ids); err != nil {
+		return nil, err
+	}
+	return s.ListSyncGroups()
+}
+
 func (s *Service) CreateSyncGroup(in SyncGroupDTO) (*SyncGroupDTO, error) {
-	if err := s.requireSub2APITarget(in.TargetID); err != nil {
+	if err := s.requireSyncTarget(in.TargetID); err != nil {
 		return nil, err
 	}
 	accounts := accountItems(in.Accounts)
-	if err := s.validateGatewaySyncAccounts(accounts); err != nil {
+	syncMode := syncModeFromInput(in.SyncMode, accounts)
+	if err := s.validateGatewaySyncAccounts(context.Background(), syncMode, accounts); err != nil {
 		return nil, err
 	}
 	sourceGroupID := int64(0)
@@ -1000,12 +1274,17 @@ func (s *Service) CreateSyncGroup(in SyncGroupDTO) (*SyncGroupDTO, error) {
 	if displayName == "" {
 		displayName = name
 	}
+	sort, err := s.syncGroups.NextSort(in.TargetID)
+	if err != nil {
+		return nil, err
+	}
 	item := &storage.UpstreamSyncGroup{
 		DisplayName:              displayName,
 		NameTemplate:             strings.TrimSpace(in.NameTemplate),
 		Name:                     name,
 		TargetID:                 in.TargetID,
 		TargetGroupIDsJSON:       marshalUintArray(in.TargetGroupIDs),
+		SyncMode:                 syncMode,
 		Platform:                 strings.TrimSpace(in.Platform),
 		ModelLimitsMode:          normalizeModelLimitsMode(in.ModelLimitsMode),
 		ModelLimitsText:          strings.TrimSpace(in.ModelLimits),
@@ -1015,6 +1294,7 @@ func (s *Service) CreateSyncGroup(in SyncGroupDTO) (*SyncGroupDTO, error) {
 		CustomErrorCodesEnabled:  in.CustomErrorCodesEnabled,
 		CustomErrorCodes:         strings.TrimSpace(in.CustomErrorCodes),
 		RateSortDirection:        strings.TrimSpace(in.RateSortDirection),
+		Sort:                     sort,
 		Enabled:                  boolValue(in.Enabled, true),
 	}
 	if item.RateSortDirection == "" {
@@ -1051,16 +1331,27 @@ func (s *Service) UpdateSyncGroup(id uint, in SyncGroupDTO) (*SyncGroupDTO, erro
 	if err != nil {
 		return nil, err
 	}
-	if err := s.requireSub2APITarget(in.TargetID); err != nil {
+	if err := s.requireSyncTarget(in.TargetID); err != nil {
+		return nil, err
+	}
+	existingAccounts, err := s.syncAccounts.ListBySyncGroupID(item.ID)
+	if err != nil {
 		return nil, err
 	}
 	accounts := accountItems(in.Accounts)
-	if err := s.validateGatewaySyncAccounts(accounts); err != nil {
+	syncMode := strings.TrimSpace(in.SyncMode)
+	if syncMode == "" {
+		syncMode = syncModeForGroup(item, existingAccounts)
+	} else {
+		syncMode = normalizeSyncMode(syncMode)
+	}
+	if err := s.validateGatewaySyncAccounts(context.Background(), syncMode, accounts); err != nil {
 		return nil, err
 	}
 	item.TargetID = in.TargetID
 	item.DisplayName = strings.TrimSpace(in.DisplayName)
 	item.TargetGroupIDsJSON = marshalUintArray(in.TargetGroupIDs)
+	item.SyncMode = syncMode
 	item.ModelLimitsMode = normalizeModelLimitsMode(in.ModelLimitsMode)
 	item.ModelLimitsText = strings.TrimSpace(in.ModelLimits)
 	item.PoolModeEnabled = in.PoolModeEnabled
@@ -1204,6 +1495,9 @@ func (s *Service) ApplySyncGroup(ctx context.Context, syncGroupID uint) (*LogDTO
 	if err != nil {
 		return nil, err
 	}
+	if normalizeTargetType(target.TargetType) == "newapi" {
+		return s.applyNewAPISyncGroup(ctx, syncGroup, target)
+	}
 	if !target.Enabled {
 		return s.appendLog(syncGroup.ID, target.ID, "apply", false, "target disabled")
 	}
@@ -1338,6 +1632,542 @@ func (s *Service) ApplySyncGroup(ctx context.Context, syncGroupID uint) (*LogDTO
 		true,
 		msg,
 	)
+}
+
+// applyNewAPISyncGroup materializes sync accounts as New API-compatible
+// channels (type 60). The local managed-account mapping stores the New API
+// channel ID, allowing subsequent applies and cleanup to stay idempotent.
+func (s *Service) applyNewAPISyncGroup(ctx context.Context, syncGroup *storage.UpstreamSyncGroup, target *storage.UpstreamSyncTarget) (*LogDTO, error) {
+	accounts, err := s.syncAccounts.ListBySyncGroupID(syncGroup.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !target.Enabled {
+		return s.appendLog(syncGroup.ID, target.ID, "apply", false, "target disabled")
+	}
+	if len(accounts) == 0 {
+		_ = s.syncGroups.UpdateStatus(syncGroup.ID, "failed", "no sync accounts", nil)
+		return s.appendLog(syncGroup.ID, target.ID, "apply", false, "no sync accounts")
+	}
+	accounts = s.sortAccountsForApply(ctx, syncGroup, accounts)
+	if err := s.syncAccounts.SaveForGroup(syncGroup.ID, accounts); err != nil {
+		_ = s.syncGroups.UpdateStatus(syncGroup.ID, "failed", err.Error(), nil)
+		return s.appendLog(syncGroup.ID, target.ID, "apply", false, err.Error())
+	}
+	if _, err := s.SyncTargetGroups(ctx, target.ID); err != nil {
+		_ = s.syncGroups.UpdateStatus(syncGroup.ID, "failed", err.Error(), nil)
+		return s.appendLog(syncGroup.ID, target.ID, "apply", false, err.Error())
+	}
+	_, selectedGroups, _, err := s.selectedTargetGroups(syncGroup)
+	if err != nil {
+		_ = s.syncGroups.UpdateStatus(syncGroup.ID, "blocked_missing_group", err.Error(), nil)
+		return s.appendLog(syncGroup.ID, target.ID, "apply", false, err.Error())
+	}
+	plain, err := s.cipher.Decrypt(target.AdminAPIKeyCipher)
+	if err != nil {
+		return nil, err
+	}
+	rateChanges := make([]string, 0)
+	rateMessages := make([]string, 0)
+	if hasGatewaySyncAccount(accounts) {
+		messages, changes, syncErr := s.syncNewAPIGroupRates(ctx, syncGroup, target, accounts, selectedGroups, plain)
+		if syncErr != nil {
+			_ = s.syncGroups.UpdateStatus(syncGroup.ID, "failed", syncErr.Error(), nil)
+			return s.appendLog(syncGroup.ID, target.ID, "apply", false, syncErr.Error())
+		}
+		rateChanges = changes
+		rateMessages = messages
+	}
+	client := newapi.NewAdminClient()
+	adminTarget := newapi.AdminTarget{BaseURL: target.BaseURL, APIKey: plain}
+	if err := client.Ping(ctx, adminTarget); err != nil {
+		s.recordTargetCheck(target.ID, err)
+		return s.appendLog(syncGroup.ID, target.ID, "apply", false, err.Error())
+	}
+	if deleted, err := s.cleanupDeletedNewAPIChannels(ctx, syncGroup, accounts, adminTarget, client); err != nil {
+		_ = s.syncGroups.UpdateStatus(syncGroup.ID, "failed", err.Error(), nil)
+		return s.appendLog(syncGroup.ID, target.ID, "apply", false, err.Error())
+	} else if deleted > 0 && s.log != nil {
+		s.log.Info("removed stale managed New API channels", "syncGroupID", syncGroup.ID, "count", deleted)
+	}
+
+	channels, err := client.ListAllChannels(ctx, adminTarget)
+	if err != nil {
+		_ = s.syncGroups.UpdateStatus(syncGroup.ID, "failed", err.Error(), nil)
+		return s.appendLog(syncGroup.ID, target.ID, "apply", false, err.Error())
+	}
+	beforeByID := make(map[int64]newapi.AdminChannel, len(channels))
+	for _, channel := range channels {
+		beforeByID[channel.ID] = channel
+	}
+	now := time.Now()
+	applied := 0
+	failures := make([]string, 0)
+	successes := make([]string, 0, len(accounts))
+	changes := append([]string(nil), rateChanges...)
+	syncedModels := make([]string, 0)
+	for i := range accounts {
+		result, applyErr := s.applyNewAPIChannel(ctx, syncGroup, &accounts[i], selectedGroups, len(accounts), adminTarget, client, beforeByID, now)
+		if applyErr != nil {
+			failures = append(failures, fmt.Sprintf("同步账号%d: %s", accounts[i].Position+1, applyErr.Error()))
+			continue
+		}
+		applied++
+		successes = append(successes, result.Message)
+		changes = append(changes, result.Changes...)
+		syncedModels = append(syncedModels, result.SyncedModels...)
+	}
+	successes = append(successes, rateMessages...)
+	msg := buildApplyLogMessage(syncGroup, target, selectedGroups, applied, failures, successes, changes, 0, 0)
+	if applied == 0 || len(failures) > 0 {
+		status := "failed"
+		if strings.Contains(msg, "missing") {
+			status = "blocked_missing_group"
+		}
+		_ = s.syncGroups.UpdateStatus(syncGroup.ID, status, msg, &now)
+		s.notifySyncGroupApplyChanged(ctx, syncGroup, target, applied, failures, changes)
+		return s.appendLog(syncGroup.ID, target.ID, "apply", false, msg)
+	}
+	if err := s.cacheSyncedModels(syncGroup, syncedModels); err != nil {
+		_ = s.syncGroups.UpdateStatus(syncGroup.ID, "failed", err.Error(), &now)
+		return s.appendLog(syncGroup.ID, target.ID, "apply", false, err.Error())
+	}
+	_ = s.syncGroups.UpdateStatus(syncGroup.ID, "applied", "", &now)
+	if len(changes) == 0 {
+		return &LogDTO{SyncGroupID: syncGroup.ID, TargetID: target.ID, Action: "apply", Success: true, Message: msg, CreatedAt: now}, nil
+	}
+	s.notifySyncGroupApplyChanged(ctx, syncGroup, target, applied, failures, changes)
+	return s.appendLog(syncGroup.ID, target.ID, "apply", true, msg)
+}
+
+// syncNewAPIGroupRates mirrors Sub2API's gateway-rate phase: every gateway
+// source applies its calculated rate to the selected target groups before all
+// sync accounts are materialized as remote channels.
+func (s *Service) syncNewAPIGroupRates(
+	ctx context.Context,
+	syncGroup *storage.UpstreamSyncGroup,
+	target *storage.UpstreamSyncTarget,
+	accounts []storage.UpstreamSyncAccount,
+	selected []storage.UpstreamSyncTargetGroup,
+	apiKey string,
+) ([]string, []string, error) {
+	settings, err := s.getNewAPIGroupSettings(ctx, target.BaseURL, apiKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	changes := make([]string, 0)
+	messages := make([]string, 0)
+	for i := range accounts {
+		account := &accounts[i]
+		if !isGatewaySyncAccount(account) {
+			continue
+		}
+		rate, rateErr := s.gatewayRateMultiplierForAccount(ctx, account)
+		if rateErr != nil {
+			return nil, nil, rateErr
+		}
+		messages = append(messages, fmt.Sprintf("账号%d 倍率同步 %s", account.Position+1, formatNumber(rate)))
+		for _, group := range selected {
+			old, ok := settings.GroupRatios[group.Name]
+			if !ok {
+				return nil, nil, fmt.Errorf("New API 分组缺失: %s", group.Name)
+			}
+			if nearlyEqualRate(old, rate) {
+				continue
+			}
+			settings.GroupRatios[group.Name] = rate
+			changes = append(changes, fmt.Sprintf("目标分组 %s 倍率 %s -> %s", group.Name, formatNumber(old), formatNumber(rate)))
+		}
+	}
+	if len(changes) > 0 {
+		if err := s.putNewAPIGroupSettings(ctx, target.BaseURL, apiKey, settings); err != nil {
+			return nil, nil, err
+		}
+		if _, err := s.SyncTargetGroups(ctx, target.ID); err != nil {
+			return nil, nil, errors.New("New API multiplier was updated remotely, but local group cache refresh failed: " + err.Error())
+		}
+	}
+	return messages, changes, nil
+}
+
+func (s *Service) applyNewAPIChannel(
+	ctx context.Context,
+	syncGroup *storage.UpstreamSyncGroup,
+	syncAccount *storage.UpstreamSyncAccount,
+	selectedGroups []storage.UpstreamSyncTargetGroup,
+	totalAccounts int,
+	adminTarget newapi.AdminTarget,
+	client *newapi.AdminClient,
+	beforeByID map[int64]newapi.AdminChannel,
+	now time.Time,
+) (*accountApplyResult, error) {
+	if syncAccount == nil {
+		return nil, errors.New("sync account is required")
+	}
+	if !isGatewaySyncAccount(syncAccount) && syncAccount.SourceGroupID == nil && strings.TrimSpace(syncAccount.SourceGroupName) == "" {
+		return nil, errors.New("source group not bound")
+	}
+	keyName := sourceAPIKeyName(syncGroup)
+	var (
+		key           *connector.APIKey
+		secret        string
+		sourceName    string
+		sourceID      uint
+		sourceBaseURL string
+		models        []string
+		err           error
+	)
+	if isGatewaySyncAccount(syncAccount) {
+		if syncAccount.GatewayGroupID == nil || *syncAccount.GatewayGroupID == 0 {
+			return nil, errors.New("gateway group is required")
+		}
+		gatewayGroup, groupErr := s.gateway.GetGroup(*syncAccount.GatewayGroupID)
+		if groupErr != nil {
+			return nil, fmt.Errorf("gateway group missing: %d", *syncAccount.GatewayGroupID)
+		}
+		key, secret, err = s.ensureGatewayKey(syncGroup, syncAccount, keyName)
+		if err != nil {
+			return nil, err
+		}
+		sourceName = "网关 " + gatewayGroup.Name
+		sourceID = gatewayGroup.ID
+		sourceBaseURL = s.gatewayBaseURL
+		if syncGroup.ModelLimitsMode == "sync_upstream" {
+			models = gatewaySyncModels(s.gateway, gatewayGroup)
+		}
+	} else {
+		ch, channelErr := s.channels.FindByID(syncAccount.SourceChannelID)
+		if channelErr != nil {
+			return nil, fmt.Errorf("source channel missing: %d", syncAccount.SourceChannelID)
+		}
+		if _, err := s.checkSourceGroup(ctx, syncAccount); err != nil {
+			return nil, err
+		}
+		key, secret, err = s.ensureSourceAPIKey(ctx, syncGroup, syncAccount, keyName)
+		if err != nil {
+			return nil, err
+		}
+		sourceName = ch.Name
+		sourceID = ch.ID
+		sourceBaseURL = ch.SiteURL
+	}
+	if syncGroup.ModelLimitsMode != "sync_upstream" {
+		models = splitList(syncGroup.ModelLimitsText)
+	}
+	if syncGroup.ModelLimitsMode == "sync_upstream" && !isGatewaySyncAccount(syncAccount) {
+		models, err = fetchGatewayModels(ctx, sourceBaseURL, syncGroup.Platform, secret)
+		if err != nil {
+			return nil, err
+		}
+		if len(models) == 0 {
+			return nil, errors.New("synced upstream models is empty")
+		}
+	}
+	models = uniqueStrings(models)
+	if len(models) == 0 {
+		return nil, errors.New("channel models are empty")
+	}
+	channelName := newAPIChannelName(syncGroup, syncAccount, totalAccounts)
+	channelReq := newapi.AdminChannel{
+		Type:     newapi.ChannelTypeNewAPI,
+		Key:      secret,
+		Status:   newapi.ChannelStatusOn,
+		Name:     channelName,
+		Weight:   uint(positiveOrDefault(syncAccount.Weight, 1)),
+		BaseURL:  sourceBaseURL,
+		Models:   strings.Join(models, ","),
+		Group:    strings.Join(newAPITargetGroupNames(selectedGroups), ","),
+		Priority: newAPIChannelPriority(syncAccount, totalAccounts),
+		Remark:   syncedAccountNotes(now),
+	}
+	channelReq = newAPIChannelDefaults(channelReq, nil)
+	if !syncAccount.Enabled {
+		channelReq.Status = newapi.ChannelStatusOff
+		channelReq.Remark = disabledManagedAccountDescription("同步账号已禁用", now)
+	}
+	var previous *newapi.AdminChannel
+	var managed *storage.UpstreamSyncManagedAccount
+	action := "创建"
+	if found, findErr := s.managedAccounts.FindByAccountID(syncAccount.ID); findErr == nil && found != nil {
+		managed = found
+		action = "更新"
+		if before, ok := beforeByID[managed.TargetAccountID]; ok {
+			previous = &before
+			channelReq = newAPIChannelDefaults(channelReq, previous)
+			channelReq.ID = before.ID
+			if err := client.UpdateChannel(ctx, adminTarget, channelReq); err == nil {
+				if before.Status != channelReq.Status {
+					if err := client.SetChannelStatus(ctx, adminTarget, before.ID, channelReq.Status); err != nil {
+						return nil, err
+					}
+				}
+			} else if !isHTTPNotFound(err) {
+				return nil, err
+			} else {
+				managed = nil
+				action = "重建"
+			}
+		} else {
+			managed = nil
+			action = "重建"
+		}
+	}
+	if managed == nil {
+		existing, err := client.FindChannelByName(ctx, adminTarget, channelName)
+		if err != nil {
+			return nil, err
+		}
+		if existing == nil {
+			baseName := managedObjectBaseName(syncGroup, syncAccount)
+			if channelName != baseName {
+				existing, err = client.FindChannelByName(ctx, adminTarget, baseName)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+		if existing != nil {
+			previous = existing
+			channelReq = newAPIChannelDefaults(channelReq, previous)
+			channelReq.ID = existing.ID
+			action = "复用更新"
+			if err := client.UpdateChannel(ctx, adminTarget, channelReq); err != nil {
+				return nil, err
+			}
+			if existing.Status != channelReq.Status {
+				if err := client.SetChannelStatus(ctx, adminTarget, existing.ID, channelReq.Status); err != nil {
+					return nil, err
+				}
+			}
+			managed = &storage.UpstreamSyncManagedAccount{TargetAccountID: existing.ID}
+		} else {
+			if err := client.CreateChannel(ctx, adminTarget, channelReq); err != nil {
+				return nil, err
+			}
+			created, err := client.FindChannelByName(ctx, adminTarget, channelName)
+			if err != nil {
+				return nil, err
+			}
+			if created == nil {
+				return nil, errors.New("New API created channel was not found")
+			}
+			if channelReq.Status != newapi.ChannelStatusOn {
+				if err := client.SetChannelStatus(ctx, adminTarget, created.ID, channelReq.Status); err != nil {
+					return nil, err
+				}
+			}
+			managed = &storage.UpstreamSyncManagedAccount{TargetAccountID: created.ID}
+		}
+	}
+	if err := s.managedAccounts.Upsert(&storage.UpstreamSyncManagedAccount{
+		SyncGroupID:        syncGroup.ID,
+		SyncAccountID:      syncAccount.ID,
+		SourceAPIKeyID:     key.ID,
+		SourceAPIKeyName:   keyName,
+		TargetAccountID:    managed.TargetAccountID,
+		TargetAccountName:  channelName,
+		TargetGroupIDsJSON: marshalUintArray(groupIDs(selectedGroups)),
+		LastAppliedAt:      &now,
+	}); err != nil {
+		return nil, err
+	}
+	message := fmt.Sprintf("账号%d：%s New API 渠道 %s(ID %d)，源渠道 %s(ID %d)，模型 %d 个", syncAccount.Position+1, action, channelName, managed.TargetAccountID, sourceName, sourceID, len(models))
+	return &accountApplyResult{
+		SyncedModels: models,
+		Message:      message,
+		Changes:      newAPIChannelChangeDetails(syncAccount, previous, channelReq, managed.TargetAccountID),
+	}, nil
+}
+
+func targetGroupNameList(groups []storage.UpstreamSyncTargetGroup) []string {
+	names := make([]string, 0, len(groups))
+	for _, group := range groups {
+		if name := strings.TrimSpace(group.Name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func newAPITargetGroupNames(groups []storage.UpstreamSyncTargetGroup) []string {
+	names := uniqueStrings(targetGroupNameList(groups))
+	if len(names) == 0 {
+		return []string{"default"}
+	}
+	return names
+}
+
+func newAPIChannelPriority(account *storage.UpstreamSyncAccount, total int) int64 {
+	if account != nil && account.Priority > 0 {
+		return account.Priority
+	}
+	if total <= 0 {
+		total = 1
+	}
+	position := 0
+	if account != nil && account.Position >= 0 {
+		position = account.Position
+	}
+	priority := total - position
+	if priority < 1 {
+		priority = 1
+	}
+	return int64(priority)
+}
+
+func newAPIChannelName(syncGroup *storage.UpstreamSyncGroup, account *storage.UpstreamSyncAccount, total int) string {
+	if syncGroup == nil {
+		return ""
+	}
+	base := strings.TrimSpace(syncGroup.Name)
+	if base == "" {
+		base = strings.TrimSpace(syncGroup.NameTemplate)
+	}
+	if total > 1 && account != nil && account.Position > 0 {
+		return fmt.Sprintf("%s-%d", base, account.Position+1)
+	}
+	return base
+}
+
+func newAPIChannelDefaults(next newapi.AdminChannel, previous *newapi.AdminChannel) newapi.AdminChannel {
+	if previous != nil {
+		if next.OpenAIOrganization == "" {
+			next.OpenAIOrganization = previous.OpenAIOrganization
+		}
+		if next.TestModel == "" {
+			next.TestModel = previous.TestModel
+		}
+		if next.Other == "" {
+			next.Other = previous.Other
+		}
+		if next.OtherInfo == "" {
+			next.OtherInfo = previous.OtherInfo
+		}
+		if next.StatusCodeMapping == "" {
+			next.StatusCodeMapping = previous.StatusCodeMapping
+		}
+		if next.Tag == "" {
+			next.Tag = previous.Tag
+		}
+		if next.ParamOverride == "" {
+			next.ParamOverride = previous.ParamOverride
+		}
+		if next.HeaderOverride == "" {
+			next.HeaderOverride = previous.HeaderOverride
+		}
+		if next.ChannelInfo == nil {
+			next.ChannelInfo = previous.ChannelInfo
+		}
+		if next.ModelMapping == "" {
+			next.ModelMapping = preserveNewAPIModelMapping(previous.ModelMapping)
+		}
+	}
+	setting := map[string]any{}
+	if previous != nil && strings.TrimSpace(previous.Setting) != "" {
+		var inherited map[string]any
+		if json.Unmarshal([]byte(previous.Setting), &inherited) == nil {
+			for key, value := range inherited {
+				setting[key] = value
+			}
+		}
+	}
+	if strings.TrimSpace(next.Setting) != "" {
+		var requested map[string]any
+		if json.Unmarshal([]byte(next.Setting), &requested) == nil {
+			for key, value := range requested {
+				setting[key] = value
+			}
+		}
+	}
+	setting["pass_through_body_enabled"] = true
+	if raw, err := json.Marshal(setting); err == nil {
+		next.Setting = string(raw)
+	}
+	other := map[string]any{}
+	if previous != nil && strings.TrimSpace(previous.OtherSettings) != "" {
+		var inherited map[string]any
+		if json.Unmarshal([]byte(previous.OtherSettings), &inherited) == nil {
+			for key, value := range inherited {
+				other[key] = value
+			}
+		}
+	}
+	if strings.TrimSpace(next.OtherSettings) != "" {
+		var requested map[string]any
+		if json.Unmarshal([]byte(next.OtherSettings), &requested) == nil {
+			for key, value := range requested {
+				other[key] = value
+			}
+		}
+	}
+	other["allow_service_tier"] = true
+	other["allow_safety_identifier"] = true
+	other["upstream_model_update_check_enabled"] = true
+	other["upstream_model_update_auto_sync_enabled"] = true
+	if raw, err := json.Marshal(other); err == nil {
+		next.OtherSettings = string(raw)
+	}
+	next.AutoBan = 0
+	return next
+}
+
+// preserveNewAPIModelMapping keeps only meaningful remote model aliases. The
+// synchronizer owns the channel model list, but must not erase an operator's
+// real alias mapping. Identity entries generated by older versions are no-op
+// noise and are intentionally dropped.
+func preserveNewAPIModelMapping(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "{}" {
+		return ""
+	}
+	var mapping map[string]string
+	if err := json.Unmarshal([]byte(raw), &mapping); err != nil {
+		return raw
+	}
+	meaningful := make(map[string]string, len(mapping))
+	for source, target := range mapping {
+		source = strings.TrimSpace(source)
+		target = strings.TrimSpace(target)
+		if source == "" || target == "" || source == target {
+			continue
+		}
+		meaningful[source] = target
+	}
+	if len(meaningful) == 0 {
+		return ""
+	}
+	encoded, err := json.Marshal(meaningful)
+	if err != nil {
+		return raw
+	}
+	return string(encoded)
+}
+
+func newAPIChannelChangeDetails(syncAccount *storage.UpstreamSyncAccount, previous *newapi.AdminChannel, next newapi.AdminChannel, id int64) []string {
+	prefix := fmt.Sprintf("账号%d：%s(ID %d)", syncAccount.Position+1, next.Name, id)
+	if previous == nil {
+		return []string{prefix + " 新增"}
+	}
+	parts := make([]string, 0)
+	if previous.Group != next.Group {
+		parts = append(parts, fmt.Sprintf("目标分组 %s -> %s", previous.Group, next.Group))
+	}
+	if previous.Models != next.Models {
+		parts = append(parts, "模型已更新")
+	}
+	if previous.Priority != next.Priority {
+		parts = append(parts, fmt.Sprintf("优先级 %d -> %d", previous.Priority, next.Priority))
+	}
+	if previous.Weight != next.Weight {
+		parts = append(parts, fmt.Sprintf("权重 %d -> %d", previous.Weight, next.Weight))
+	}
+	if previous.Status != next.Status {
+		parts = append(parts, fmt.Sprintf("状态 %d -> %d", previous.Status, next.Status))
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return []string{prefix + " " + strings.Join(parts, "，")}
 }
 
 func (s *Service) sortAccountsForApply(ctx context.Context, syncGroup *storage.UpstreamSyncGroup, accounts []storage.UpstreamSyncAccount) []storage.UpstreamSyncAccount {
@@ -2034,7 +2864,7 @@ func testRemoteAccountChange(syncAccount *storage.UpstreamSyncAccount, accountNa
 }
 
 func syncedAccountNotes(at time.Time) string {
-	return "Upstream Ops 同步\n同步时间：" + formatSyncNoteTime(at)
+	return "网关同步\n同步时间：" + formatSyncNoteTime(at)
 }
 
 func formatSyncNoteTime(at time.Time) string {
@@ -2338,6 +3168,42 @@ func (s *Service) cleanupUnmanagedRemoteAccounts(
 	return deleted, nil
 }
 
+func (s *Service) cleanupDeletedNewAPIChannels(
+	ctx context.Context,
+	syncGroup *storage.UpstreamSyncGroup,
+	accounts []storage.UpstreamSyncAccount,
+	target newapi.AdminTarget,
+	client *newapi.AdminClient,
+) (int, error) {
+	current := make(map[uint]struct{}, len(accounts))
+	for _, account := range accounts {
+		if account.ID != 0 {
+			current[account.ID] = struct{}{}
+		}
+	}
+	managed, err := s.managedAccounts.ListBySyncGroupID(syncGroup.ID)
+	if err != nil {
+		return 0, err
+	}
+	deleted := 0
+	for _, item := range managed {
+		if _, exists := current[item.SyncAccountID]; exists {
+			continue
+		}
+		// The managed mapping is authoritative for New API channels. Names can
+		// legitimately differ after a remote rename, so do not gate cleanup on
+		// the generated-name heuristic used for unmanaged-object discovery.
+		if err := client.DeleteChannel(ctx, target, item.TargetAccountID); err != nil && !isHTTPNotFound(err) {
+			return deleted, err
+		}
+		if err := s.managedAccounts.Delete(item.ID); err != nil {
+			return deleted, err
+		}
+		deleted++
+	}
+	return deleted, nil
+}
+
 func (s *Service) DeleteManaged(ctx context.Context, syncGroupID uint) (*LogDTO, error) {
 	syncGroup, err := s.syncGroups.FindByID(syncGroupID)
 	if err != nil {
@@ -2351,11 +3217,19 @@ func (s *Service) DeleteManaged(ctx context.Context, syncGroupID uint) (*LogDTO,
 		target, err := s.targets.FindByID(syncGroup.TargetID)
 		if err == nil {
 			if plain, decErr := s.cipher.Decrypt(target.AdminAPIKeyCipher); decErr == nil {
-				client := sub2api.NewAdminClient()
-				adminTarget := sub2api.AdminTarget{BaseURL: target.BaseURL, APIKey: plain}
-				for _, account := range managedAccounts {
-					if isManagedAccountName(syncGroup, account.TargetAccountName) {
-						_ = client.DeleteAccount(ctx, adminTarget, account.TargetAccountID)
+				if normalizeTargetType(target.TargetType) == "newapi" {
+					client := newapi.NewAdminClient()
+					adminTarget := newapi.AdminTarget{BaseURL: target.BaseURL, APIKey: plain}
+					for _, account := range managedAccounts {
+						_ = client.DeleteChannel(ctx, adminTarget, account.TargetAccountID)
+					}
+				} else {
+					client := sub2api.NewAdminClient()
+					adminTarget := sub2api.AdminTarget{BaseURL: target.BaseURL, APIKey: plain}
+					for _, account := range managedAccounts {
+						if isManagedAccountName(syncGroup, account.TargetAccountName) {
+							_ = client.DeleteAccount(ctx, adminTarget, account.TargetAccountID)
+						}
 					}
 				}
 			}
@@ -2500,7 +3374,7 @@ func (s *Service) rateScanFingerprint(ctx context.Context, syncGroup *storage.Up
 		}
 		part := fmt.Sprintf("%d:%t:%s:%d:%d:%s:%d:%s:%s", account.ID, account.Enabled, normalizeSyncAccountSourceKind(account.SourceKind), account.SourceChannelID, sourceGroupID, strings.TrimSpace(account.SourceGroupName), gatewayGroupID, strings.TrimSpace(account.RateConvertMode), formatNumber(account.RateConvertValue))
 		if isGatewaySyncAccount(&account) {
-			rate, err := s.gatewayRateMultiplierForAccount(&account)
+			rate, err := s.gatewayRateMultiplierForAccount(ctx, &account)
 			if err != nil {
 				return "", err
 			}
@@ -2564,21 +3438,64 @@ func (s *Service) selectedTargetGroups(syncGroup *storage.UpstreamSyncGroup) ([]
 		return nil, nil, nil, err
 	}
 	if len(ids) == 0 {
-		return nil, nil, nil, errors.New("target group missing")
+		if target, targetErr := s.targets.FindByID(syncGroup.TargetID); targetErr == nil && normalizeTargetType(target.TargetType) == "newapi" {
+			for _, group := range all {
+				if strings.EqualFold(strings.TrimSpace(group.Name), "default") && group.Status != "missing" {
+					ids = []uint{group.ID}
+					break
+				}
+			}
+		}
+		if len(ids) == 0 {
+			return nil, nil, nil, errors.New("target group missing")
+		}
 	}
 	byID := make(map[uint]storage.UpstreamSyncTargetGroup, len(all))
 	for _, g := range all {
 		byID[g.ID] = g
 	}
+	targetType := ""
+	if target, targetErr := s.targets.FindByID(syncGroup.TargetID); targetErr == nil {
+		targetType = normalizeTargetType(target.TargetType)
+	}
 	selected := make([]storage.UpstreamSyncTargetGroup, 0, len(ids))
 	remoteIDs := make([]int64, 0, len(ids))
+	validIDs := make([]uint, 0, len(ids))
+	staleIDs := make([]uint, 0)
 	for _, id := range ids {
 		g, ok := byID[id]
 		if !ok || g.Status == "missing" {
+			if targetType == "newapi" {
+				staleIDs = append(staleIDs, id)
+				continue
+			}
 			return all, selected, remoteIDs, fmt.Errorf("target group missing: %d", id)
 		}
 		selected = append(selected, g)
 		remoteIDs = append(remoteIDs, g.RemoteGroupID)
+		validIDs = append(validIDs, g.ID)
+	}
+	if len(staleIDs) > 0 && targetType == "newapi" {
+		// New API group IDs are local cache IDs and can change when a remote
+		// group is removed and recreated. Keep valid selections usable and
+		// persist the cleaned selection so every subsequent apply is stable.
+		if len(selected) == 0 {
+			for _, g := range all {
+				if strings.EqualFold(strings.TrimSpace(g.Name), "default") && g.Status != "missing" {
+					selected = append(selected, g)
+					remoteIDs = append(remoteIDs, g.RemoteGroupID)
+					validIDs = append(validIDs, g.ID)
+					break
+				}
+			}
+		}
+		if len(selected) == 0 {
+			return all, selected, remoteIDs, errors.New("target group missing")
+		}
+		syncGroup.TargetGroupIDsJSON = marshalUintArray(validIDs)
+		if err := s.syncGroups.Update(syncGroup); err != nil {
+			return all, selected, remoteIDs, err
+		}
 	}
 	return all, selected, remoteIDs, nil
 }
@@ -2777,6 +3694,30 @@ func normalizeSyncAccountSourceKind(value string) string {
 	return "channel"
 }
 
+func normalizeSyncMode(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), "gateway_rate") {
+		return "gateway_rate"
+	}
+	return "account"
+}
+
+// syncModeForGroup defaults records without an explicit mode to account sync.
+// A gateway group is a valid upstream source for a New API channel; it must not
+// be silently reinterpreted as a multiplier-only operation.
+func syncModeForGroup(group *storage.UpstreamSyncGroup, accounts []storage.UpstreamSyncAccount) string {
+	if group != nil && strings.TrimSpace(group.SyncMode) != "" {
+		return normalizeSyncMode(group.SyncMode)
+	}
+	return "account"
+}
+
+func syncModeFromInput(value string, accounts []storage.UpstreamSyncAccount) string {
+	if strings.TrimSpace(value) == "" {
+		return syncModeForGroup(nil, accounts)
+	}
+	return normalizeSyncMode(value)
+}
+
 func normalizeGatewayRateMode(value string) string {
 	if strings.EqualFold(strings.TrimSpace(value), "min") {
 		return "min"
@@ -2797,7 +3738,7 @@ func hasGatewaySyncAccount(accounts []storage.UpstreamSyncAccount) bool {
 	return false
 }
 
-func (s *Service) validateGatewaySyncAccounts(accounts []storage.UpstreamSyncAccount) error {
+func (s *Service) validateGatewaySyncAccounts(ctx context.Context, syncMode string, accounts []storage.UpstreamSyncAccount) error {
 	count := 0
 	for i := range accounts {
 		if !isGatewaySyncAccount(&accounts[i]) {
@@ -2814,11 +3755,21 @@ func (s *Service) validateGatewaySyncAccounts(accounts []storage.UpstreamSyncAcc
 	if count == 0 {
 		return nil
 	}
-	if count > 1 {
-		return errors.New("only one gateway multiplier sync account is supported per sync group")
+	if syncMode == "gateway_rate" && (len(accounts) != 1 || count != 1) {
+		return errors.New("gateway multiplier sync requires exactly one gateway group")
 	}
 	if s.gateway == nil {
 		return errors.New("gateway service is unavailable")
+	}
+	if syncMode == "gateway_rate" {
+		status, err := s.gateway.GetRateSyncStatus(ctx, *accounts[0].GatewayGroupID)
+		if err != nil {
+			return err
+		}
+		if !status.Ready {
+			return errors.New(status.Error())
+		}
+		return nil
 	}
 	if strings.TrimSpace(s.gatewayBaseURL) == "" {
 		return errors.New("server.baseURL is required for gateway multiplier sync")
@@ -2881,27 +3832,20 @@ func (s *Service) ensureGatewayKey(syncGroup *storage.UpstreamSyncGroup, syncAcc
 	return &connector.APIKey{ID: int64(created.Key.ID), Name: created.Key.Name}, created.Secret, nil
 }
 
-func (s *Service) gatewayRateMultiplierForAccount(syncAccount *storage.UpstreamSyncAccount) (float64, error) {
+func (s *Service) gatewayRateMultiplierForAccount(ctx context.Context, syncAccount *storage.UpstreamSyncAccount) (float64, error) {
 	if s.gateway == nil || syncAccount == nil || syncAccount.GatewayGroupID == nil || *syncAccount.GatewayGroupID == 0 {
 		return 0, errors.New("gateway group is required")
 	}
-	routes, err := s.gateway.ListRoutes(*syncAccount.GatewayGroupID)
+	status, err := s.gateway.GetRateSyncStatus(ctx, *syncAccount.GatewayGroupID)
 	if err != nil {
 		return 0, err
 	}
-	rates := make([]float64, 0, len(routes))
-	for _, route := range routes {
-		if route.Enabled && route.BillingRateMultiplier > 0 {
-			rates = append(rates, route.BillingRateMultiplier)
-		}
+	if !status.Ready {
+		return 0, errors.New(status.Error())
 	}
-	if len(rates) == 0 {
-		return 0, errors.New("gateway group has no enabled routes with a billing multiplier")
-	}
-	sort.Float64s(rates)
-	base := rates[len(rates)-1]
+	base := status.MaxRate
 	if normalizeGatewayRateMode(syncAccount.GatewayRateMode) == "min" {
-		base = rates[0]
+		base = status.MinRate
 	}
 	computed := applyGatewayRateOperation(base, syncAccount.RateConvertMode, syncAccount.RateConvertValue)
 	return clampGatewayRate(computed, syncAccount.GatewayRateMin, syncAccount.GatewayRateMax), nil
@@ -2919,7 +3863,7 @@ func (s *Service) syncGatewayTargetGroupRates(
 		if !isGatewaySyncAccount(account) {
 			continue
 		}
-		rate, err := s.gatewayRateMultiplierForAccount(account)
+		rate, err := s.gatewayRateMultiplierForAccount(ctx, account)
 		if err != nil {
 			return nil, err
 		}
@@ -3009,12 +3953,30 @@ func managedObjectMatchName(name string) string {
 }
 
 func isManagedAccountName(syncGroup *storage.UpstreamSyncGroup, name string) bool {
-	return strings.HasPrefix(managedObjectMatchName(name), syncGroup.Name+"-账号")
+	base := managedObjectMatchName(name)
+	if strings.HasPrefix(base, syncGroup.Name+"-账号") {
+		return true
+	}
+	if strings.HasPrefix(base, syncGroup.Name+"-") {
+		rest := strings.TrimPrefix(base, syncGroup.Name+"-")
+		if rest != "" {
+			for _, r := range rest {
+				if r < '0' || r > '9' {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	return strings.EqualFold(strings.TrimSpace(base), strings.TrimSpace(syncGroup.Name))
 }
 
 func managedAccountPosition(syncGroup *storage.UpstreamSyncGroup, name string) (int, bool) {
 	base := managedObjectMatchName(name)
 	prefix := syncGroup.Name + "-账号"
+	if !strings.HasPrefix(base, prefix) {
+		prefix = syncGroup.Name + "-"
+	}
 	if !strings.HasPrefix(base, prefix) {
 		return 0, false
 	}
@@ -3349,6 +4311,7 @@ func accountItems(list []SyncAccountDTO) []storage.UpstreamSyncAccount {
 			ProxyID:          item.ProxyID,
 			Concurrency:      concurrency,
 			Weight:           weight,
+			Priority:         item.Priority,
 			RateConvertMode:  mode,
 			RateConvertValue: value,
 			Enabled:          item.Enabled,
@@ -3459,11 +4422,13 @@ func (s *Service) toGroupDTO(item *storage.UpstreamSyncTargetGroup) TargetGroupD
 func (s *Service) toSyncGroupDTO(item *storage.UpstreamSyncGroup, ids []uint, accounts []storage.UpstreamSyncAccount) SyncGroupDTO {
 	return SyncGroupDTO{
 		ID:                       item.ID,
+		Sort:                     item.Sort,
 		DisplayName:              item.DisplayName,
 		NameTemplate:             item.NameTemplate,
 		Name:                     item.Name,
 		TargetID:                 item.TargetID,
 		TargetGroupIDs:           ids,
+		SyncMode:                 syncModeForGroup(item, accounts),
 		Platform:                 item.Platform,
 		ModelLimitsMode:          normalizeModelLimitsMode(item.ModelLimitsMode),
 		ModelLimits:              item.ModelLimitsText,
@@ -3504,6 +4469,7 @@ func accountDTOs(list []storage.UpstreamSyncAccount) []SyncAccountDTO {
 			ProxyID:          item.ProxyID,
 			Concurrency:      item.Concurrency,
 			Weight:           item.Weight,
+			Priority:         item.Priority,
 			RateConvertMode:  item.RateConvertMode,
 			RateConvertValue: item.RateConvertValue,
 			Enabled:          item.Enabled,

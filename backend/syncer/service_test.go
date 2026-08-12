@@ -1950,7 +1950,7 @@ func TestApplySyncGroupDisablesManagedAccountWhenSourceGroupUnbound(t *testing.T
 	if admin.accounts[10]["schedulable"] != true {
 		t.Fatalf("restored account schedulable = %#v, want true", admin.accounts[10]["schedulable"])
 	}
-	if !strings.Contains(fmt.Sprint(admin.accounts[10]["notes"]), "Upstream Ops 同步") || !strings.Contains(fmt.Sprint(admin.accounts[10]["notes"]), "同步时间：") {
+	if !strings.Contains(fmt.Sprint(admin.accounts[10]["notes"]), "网关同步") || !strings.Contains(fmt.Sprint(admin.accounts[10]["notes"]), "同步时间：") {
 		t.Fatalf("restored account notes = %#v", admin.accounts[10]["notes"])
 	}
 }
@@ -2603,6 +2603,64 @@ func TestReorderSub2APIGroupsWritesRemoteSortOrder(t *testing.T) {
 	}
 }
 
+func TestReorderSyncGroupsPersistsOrderPerTarget(t *testing.T) {
+	db := openSyncerTestDB(t)
+	svc := newTestService(t, db, &fakeChannelService{})
+	firstTarget, err := svc.CreateTarget(context.Background(), TargetInput{
+		Name: "first", BaseURL: "https://first.example", AdminAPIKey: "first-key", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create first target: %v", err)
+	}
+	secondTarget, err := svc.CreateTarget(context.Background(), TargetInput{
+		Name: "second", BaseURL: "https://second.example", AdminAPIKey: "second-key", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create second target: %v", err)
+	}
+	create := func(targetID uint, name string) *SyncGroupDTO {
+		item, createErr := svc.CreateSyncGroup(SyncGroupDTO{
+			DisplayName: name, NameTemplate: name, TargetID: targetID, Platform: "openai",
+		})
+		if createErr != nil {
+			t.Fatalf("create sync group %s: %v", name, createErr)
+		}
+		return item
+	}
+	first := create(firstTarget.ID, "first-one")
+	second := create(firstTarget.ID, "first-two")
+	other := create(secondTarget.ID, "second-one")
+	if first.Sort != 1 || second.Sort != 2 || other.Sort != 1 {
+		t.Fatalf("initial sort values = %d, %d, %d", first.Sort, second.Sort, other.Sort)
+	}
+
+	if _, err := svc.ReorderSyncGroups(firstTarget.ID, []uint{second.ID, first.ID}); err != nil {
+		t.Fatalf("reorder sync groups: %v", err)
+	}
+	list, err := svc.ListSyncGroups()
+	if err != nil {
+		t.Fatalf("list sync groups: %v", err)
+	}
+	var firstTargetGroups []SyncGroupDTO
+	var secondTargetGroups []SyncGroupDTO
+	for _, item := range list {
+		if item.TargetID == firstTarget.ID {
+			firstTargetGroups = append(firstTargetGroups, item)
+		} else if item.TargetID == secondTarget.ID {
+			secondTargetGroups = append(secondTargetGroups, item)
+		}
+	}
+	if len(firstTargetGroups) != 2 || firstTargetGroups[0].ID != second.ID || firstTargetGroups[0].Sort != 1 || firstTargetGroups[1].ID != first.ID || firstTargetGroups[1].Sort != 2 {
+		t.Fatalf("first target order = %#v", firstTargetGroups)
+	}
+	if len(secondTargetGroups) != 1 || secondTargetGroups[0].ID != other.ID || secondTargetGroups[0].Sort != 1 {
+		t.Fatalf("second target order = %#v", secondTargetGroups)
+	}
+	if _, err := svc.ReorderSyncGroups(firstTarget.ID, []uint{first.ID}); err == nil {
+		t.Fatal("expected incomplete order to be rejected")
+	}
+}
+
 func TestAccountItemsSkipsBlankChannelRows(t *testing.T) {
 	items := accountItems([]SyncAccountDTO{
 		{SourceChannelID: 0},
@@ -2785,7 +2843,7 @@ func TestNewAPIGroupManagementWritesGroupOptions(t *testing.T) {
 	}
 }
 
-func TestNewAPITargetCannotCreateSub2APISyncGroup(t *testing.T) {
+func TestNewAPITargetCanCreateSyncGroup(t *testing.T) {
 	db := openSyncerTestDB(t)
 	svc := newTestService(t, db, &fakeChannelService{})
 	target, err := svc.CreateTarget(context.Background(), TargetInput{
@@ -2794,7 +2852,491 @@ func TestNewAPITargetCannotCreateSub2APISyncGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
-	if _, err := svc.CreateSyncGroup(SyncGroupDTO{TargetID: target.ID}); err == nil {
-		t.Fatal("expected New API target to be rejected for Sub2API sync group")
+	group, err := svc.CreateSyncGroup(SyncGroupDTO{TargetID: target.ID})
+	if err != nil {
+		t.Fatalf("create New API sync group: %v", err)
+	}
+	if group.TargetID != target.ID {
+		t.Fatalf("target ID = %d, want %d", group.TargetID, target.ID)
+	}
+}
+
+func TestReorderNewAPITargetGroupsUsesCachedSnapshotAndKeepsAutoGroups(t *testing.T) {
+	for _, name := range []string{"auto", "default", "vip"} {
+		id := newAPIGroupRemoteID(name)
+		if id <= 0 || id > 9007199254740991 {
+			t.Fatalf("remote ID for %q = %d, outside JavaScript safe integer range", name, id)
+		}
+	}
+	options := map[string]string{
+		"AutoGroups":       `["vip","default"]`,
+		"GroupRatio":       `{"auto":0,"default":1,"vip":2}`,
+		"UserUsableGroups": `{"auto":"Automatic","default":"Default","vip":"VIP"}`,
+		"TopupGroupRatio":  `{}`,
+	}
+	var mu sync.Mutex
+	getCount := 0
+	putKeys := make([]string, 0)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/option/", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer root-token" {
+			t.Fatalf("authorization = %q", got)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Method {
+		case http.MethodGet:
+			getCount++
+			data := make([]map[string]string, 0, len(options))
+			for _, key := range []string{"AutoGroups", "GroupRatio", "UserUsableGroups", "TopupGroupRatio"} {
+				data = append(data, map[string]string{"key": key, "value": options[key]})
+			}
+			respondJSON(w, map[string]any{"success": true, "data": data})
+		case http.MethodPut:
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode option update: %v", err)
+			}
+			if body["key"] != "AutoGroups" && body["key"] != "GroupRatio" {
+				t.Fatalf("updated option = %q", body["key"])
+			}
+			putKeys = append(putKeys, body["key"])
+			options[body["key"]] = body["value"]
+			respondJSON(w, map[string]any{"success": true})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	db := openSyncerTestDB(t)
+	svc := newTestService(t, db, &fakeChannelService{})
+	target, err := svc.CreateTarget(context.Background(), TargetInput{
+		Name: "newapi", TargetType: "newapi", BaseURL: server.URL, AdminAPIKey: "root-token", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	groups, err := svc.SyncTargetGroups(context.Background(), target.ID)
+	if err != nil {
+		t.Fatalf("sync groups: %v", err)
+	}
+	if got := []string{groups[0].Name, groups[1].Name, groups[2].Name}; !reflect.DeepEqual(got, []string{"auto", "default", "vip"}) {
+		t.Fatalf("initial groups = %#v", got)
+	}
+
+	orderedIDs := []int64{
+		newAPIGroupRemoteID("vip"),
+		newAPIGroupRemoteID("auto"),
+		newAPIGroupRemoteID("default"),
+	}
+	updated, err := svc.ReorderTargetGroups(context.Background(), target.ID, orderedIDs)
+	if err != nil {
+		t.Fatalf("reorder groups: %v", err)
+	}
+	mu.Lock()
+	saved := options["AutoGroups"]
+	savedRatios := options["GroupRatio"]
+	gets := getCount
+	keys := append([]string(nil), putKeys...)
+	mu.Unlock()
+	if saved != `["vip","default"]` {
+		t.Fatalf("AutoGroups = %q", saved)
+	}
+	if gets != 2 {
+		t.Fatalf("New API option GET count = %d, want initial sync plus one live validation", gets)
+	}
+	if !reflect.DeepEqual(keys, []string{"GroupRatio"}) {
+		t.Fatalf("updated options = %#v", keys)
+	}
+	if got := []string{updated[0].Name, updated[1].Name, updated[2].Name}; !reflect.DeepEqual(got, []string{"vip", "auto", "default"}) {
+		t.Fatalf("updated groups = %#v", got)
+	}
+	if savedRatios != `{"vip":2,"auto":0,"default":1}` {
+		t.Fatalf("GroupRatio = %q", savedRatios)
+	}
+	if got := options["GroupRatio"]; got != `{"vip":2,"auto":0,"default":1}` {
+		t.Fatalf("GroupRatio = %q", got)
+	}
+}
+
+func TestNewAPIApplySyncGroupCreatesUpdatesAndDeletesChannel(t *testing.T) {
+	var mu sync.Mutex
+	options := map[string]string{
+		"AutoGroups":       `[]`,
+		"GroupRatio":       `{"default":1,"premium":2}`,
+		"UserUsableGroups": `{"default":"Default","premium":"Premium"}`,
+		"TopupGroupRatio":  `{}`,
+	}
+	channels := map[int64]map[string]any{}
+	nextID := int64(10)
+	createCount := 0
+	updateCount := 0
+	deleteIDs := make([]int64, 0)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/option/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer root-token" {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Method {
+		case http.MethodGet:
+			data := make([]map[string]string, 0, len(options))
+			for _, key := range []string{"AutoGroups", "GroupRatio", "UserUsableGroups", "TopupGroupRatio"} {
+				data = append(data, map[string]string{"key": key, "value": options[key]})
+			}
+			respondJSON(w, map[string]any{"success": true, "data": data})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/channel/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer root-token" {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Method {
+		case http.MethodGet:
+			items := make([]map[string]any, 0, len(channels))
+			for _, channel := range channels {
+				items = append(items, channel)
+			}
+			respondJSON(w, map[string]any{"success": true, "data": map[string]any{"items": items}})
+		case http.MethodPost:
+			var body struct {
+				Channel map[string]any `json:"channel"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode create channel: %v", err)
+			}
+			body.Channel["id"] = nextID
+			body.Channel["status"] = float64(1)
+			channels[nextID] = body.Channel
+			nextID++
+			createCount++
+			respondJSON(w, map[string]any{"success": true, "data": map[string]any{}})
+		case http.MethodPut:
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode update channel: %v", err)
+			}
+			id, _ := body["id"].(float64)
+			if _, exists := channels[int64(id)]; !exists {
+				w.WriteHeader(http.StatusNotFound)
+				respondJSON(w, map[string]any{"success": false, "message": "channel not found"})
+				return
+			}
+			body["status"] = channels[int64(id)]["status"]
+			channels[int64(id)] = body
+			updateCount++
+			respondJSON(w, map[string]any{"success": true, "data": map[string]any{}})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			if r.Header.Get("Authorization") != "Bearer sk-created" {
+				t.Fatalf("source authorization = %q", r.Header.Get("Authorization"))
+			}
+			respondJSON(w, map[string]any{"data": []map[string]any{{"id": "gpt-a"}, {"id": "gpt-b"}}})
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/channel/") && r.URL.Path != "/api/channel/" {
+			if r.Header.Get("Authorization") != "Bearer root-token" {
+				t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+			}
+			var id int64
+			if _, err := fmt.Sscanf(strings.TrimPrefix(strings.TrimSuffix(r.URL.Path, "/status"), "/api/channel/"), "%d", &id); err != nil {
+				t.Fatalf("parse channel id: %v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if strings.HasSuffix(r.URL.Path, "/status") {
+				var body struct {
+					Status int `json:"status"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatalf("decode status: %v", err)
+				}
+				channels[id]["status"] = float64(body.Status)
+				respondJSON(w, map[string]any{"success": true, "data": map[string]any{}})
+				return
+			}
+			if r.Method == http.MethodDelete {
+				delete(channels, id)
+				deleteIDs = append(deleteIDs, id)
+				respondJSON(w, map[string]any{"success": true, "data": map[string]any{}})
+				return
+			}
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+
+	db := openSyncerTestDB(t)
+	ch := &storage.Channel{Name: "source", Type: storage.ChannelTypeSub2API, SiteURL: server.URL}
+	if err := storage.NewChannels(db).Create(ch); err != nil {
+		t.Fatalf("create source channel: %v", err)
+	}
+	sourceGroupID := int64(7)
+	fake := &fakeChannelService{groups: []connector.APIKeyGroup{{ID: &sourceGroupID, Name: "source", Ratio: 1}}}
+	svc := newTestService(t, db, fake)
+	target, err := svc.CreateTarget(context.Background(), TargetInput{Name: "newapi", TargetType: "newapi", BaseURL: server.URL, AdminAPIKey: "root-token", Enabled: true})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	groups, err := svc.SyncTargetGroups(context.Background(), target.ID)
+	if err != nil {
+		t.Fatalf("sync New API groups: %v", err)
+	}
+	if len(groups) != 2 || groups[0].RemoteGroupID <= 0 {
+		t.Fatalf("cached New API groups = %#v", groups)
+	}
+	for _, group := range groups {
+		if group.Platform != "" {
+			t.Fatalf("New API group platform = %q, want empty", group.Platform)
+		}
+	}
+	rule, err := svc.CreateSyncGroup(SyncGroupDTO{
+		NameTemplate: "new-{同步分组ID}", TargetID: target.ID, TargetGroupIDs: []uint{groups[1].ID}, Platform: "openai", ModelLimitsMode: "sync_upstream",
+		Accounts: []SyncAccountDTO{{SourceChannelID: ch.ID, SourceGroupID: &sourceGroupID, Weight: 3, Enabled: true}},
+	})
+	if err != nil {
+		t.Fatalf("create sync group: %v", err)
+	}
+	if log, err := svc.ApplySyncGroup(context.Background(), rule.ID); err != nil || !log.Success {
+		t.Fatalf("first apply = %#v, %v", log, err)
+	}
+	mu.Lock()
+	if createCount != 1 || len(channels) != 1 {
+		mu.Unlock()
+		t.Fatalf("created channels = %d/%d", createCount, len(channels))
+	}
+	var remote map[string]any
+	for _, channel := range channels {
+		remote = channel
+	}
+	if remote["type"] != float64(60) || remote["group"] != "premium" || remote["models"] != "gpt-a,gpt-b" || remote["key"] != "sk-created" {
+		mu.Unlock()
+		t.Fatalf("remote channel = %#v", remote)
+	}
+	if remote["model_mapping"] != "" {
+		mu.Unlock()
+		t.Fatalf("automatic model mapping = %#v, want empty", remote["model_mapping"])
+	}
+	if remote["auto_ban"] != float64(0) {
+		mu.Unlock()
+		t.Fatalf("auto_ban = %#v, want 0", remote["auto_ban"])
+	}
+	var setting map[string]any
+	var settings map[string]any
+	_ = json.Unmarshal([]byte(remote["setting"].(string)), &setting)
+	_ = json.Unmarshal([]byte(remote["settings"].(string)), &settings)
+	for _, key := range []string{"allow_service_tier", "allow_safety_identifier", "upstream_model_update_check_enabled", "upstream_model_update_auto_sync_enabled"} {
+		if settings[key] != true {
+			mu.Unlock()
+			t.Fatalf("settings[%q] = %#v, want true", key, settings[key])
+		}
+	}
+	if setting["pass_through_body_enabled"] != true {
+		mu.Unlock()
+		t.Fatalf("setting pass-through = %#v, want true", setting["pass_through_body_enabled"])
+	}
+	remote["setting"] = `{"manual_setting":true}`
+	remote["settings"] = `{"manual_setting":true}`
+	remote["param_override"] = `{"temperature":0.2}`
+	remote["header_override"] = `{"X-Manual":"keep"}`
+	mu.Unlock()
+	if log, err := svc.ApplySyncGroup(context.Background(), rule.ID); err != nil || !log.Success {
+		t.Fatalf("second apply = %#v, %v", log, err)
+	}
+	mu.Lock()
+	if createCount != 1 || updateCount != 1 {
+		mu.Unlock()
+		t.Fatalf("channel operations create=%d update=%d", createCount, updateCount)
+	}
+	for _, channel := range channels {
+		remote = channel
+	}
+	if remote["param_override"] != `{"temperature":0.2}` || remote["header_override"] != `{"X-Manual":"keep"}` {
+		mu.Unlock()
+		t.Fatalf("manual overrides were not preserved: %#v", remote)
+	}
+	_ = json.Unmarshal([]byte(remote["setting"].(string)), &setting)
+	_ = json.Unmarshal([]byte(remote["settings"].(string)), &settings)
+	if setting["manual_setting"] != true || settings["manual_setting"] != true {
+		mu.Unlock()
+		t.Fatalf("manual settings were not preserved: setting=%#v settings=%#v", setting, settings)
+	}
+	mu.Unlock()
+	if _, err := svc.DeleteManaged(context.Background(), rule.ID); err != nil {
+		t.Fatalf("delete managed: %v", err)
+	}
+	mu.Lock()
+	deletes := append([]int64(nil), deleteIDs...)
+	remaining := len(channels)
+	mu.Unlock()
+	if !reflect.DeepEqual(deletes, []int64{10}) || remaining != 0 || fake.deleteCount != 1 {
+		t.Fatalf("delete IDs=%#v remaining=%d source key deletes=%d", deletes, remaining, fake.deleteCount)
+	}
+}
+
+func TestNewAPIGatewaySyncUpdatesGroupRatioAndCreatesChannel(t *testing.T) {
+	options := map[string]string{
+		"AutoGroups":       `[]`,
+		"GroupRatio":       `{"default":1}`,
+		"UserUsableGroups": `{"default":"Default"}`,
+		"TopupGroupRatio":  `{}`,
+	}
+	var mu sync.Mutex
+	updates := make([]string, 0)
+	channels := map[int64]map[string]any{}
+	nextChannelID := int64(10)
+	createCount := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/option/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer root-token" {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Method {
+		case http.MethodGet:
+			data := make([]map[string]string, 0, len(options))
+			for _, key := range []string{"AutoGroups", "GroupRatio", "UserUsableGroups", "TopupGroupRatio"} {
+				data = append(data, map[string]string{"key": key, "value": options[key]})
+			}
+			respondJSON(w, map[string]any{"success": true, "data": data})
+		case http.MethodPut:
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode option update: %v", err)
+			}
+			options[body["key"]] = body["value"]
+			updates = append(updates, body["key"])
+			respondJSON(w, map[string]any{"success": true, "data": map[string]any{}})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/channel/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer root-token" {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Method {
+		case http.MethodGet:
+			items := make([]map[string]any, 0, len(channels))
+			for _, channel := range channels {
+				items = append(items, channel)
+			}
+			respondJSON(w, map[string]any{"success": true, "data": map[string]any{"items": items}})
+		case http.MethodPost:
+			var body struct {
+				Mode    string         `json:"mode"`
+				Channel map[string]any `json:"channel"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode channel create: %v", err)
+			}
+			if body.Mode != "single" {
+				t.Fatalf("channel mode = %q, want single", body.Mode)
+			}
+			body.Channel["id"] = nextChannelID
+			body.Channel["status"] = float64(1)
+			channels[nextChannelID] = body.Channel
+			nextChannelID++
+			createCount++
+			respondJSON(w, map[string]any{"success": true, "data": map[string]any{}})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	db := openSyncerTestDB(t)
+	cipher, err := crypto.NewCipher("test-secret")
+	if err != nil {
+		t.Fatalf("new gateway cipher: %v", err)
+	}
+	gatewaySvc := gateway.NewService(
+		storage.NewGatewayGroups(db),
+		storage.NewGatewayKeys(db),
+		storage.NewGatewayRoutes(db),
+		nil,
+		nil,
+		storage.NewChannels(db),
+		&fakeChannelService{},
+		cipher,
+		nil,
+	)
+	group, err := gatewaySvc.CreateGroup(gateway.CreateGroupInput{
+		Name: "rate-source", ModelsJSON: `[{"id":"gateway-model","source":"custom"}]`,
+		ModelsMode: "manual",
+	})
+	if err != nil {
+		t.Fatalf("create gateway group: %v", err)
+	}
+	if err := storage.NewGatewayRoutes(db).SaveForGroup(group.ID, []storage.GatewayRoute{{
+		SourceChannelID:       1,
+		SourceGroupName:       "default",
+		Enabled:               true,
+		BillingRateMultiplier: 2.5,
+	}}); err != nil {
+		t.Fatalf("save gateway route: %v", err)
+	}
+	svc := newTestServiceWithGateway(t, db, &fakeChannelService{}, gatewaySvc, "https://gateway.example")
+	target, err := svc.CreateTarget(context.Background(), TargetInput{Name: "newapi", TargetType: "newapi", BaseURL: server.URL, AdminAPIKey: "root-token", Enabled: true})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	targetGroups, err := svc.SyncTargetGroups(context.Background(), target.ID)
+	if err != nil {
+		t.Fatalf("sync target groups: %v", err)
+	}
+	groupID := group.ID
+	rule, err := svc.CreateSyncGroup(SyncGroupDTO{
+		NameTemplate: "new-rate-{同步分组ID}", TargetID: target.ID, TargetGroupIDs: []uint{targetGroups[0].ID}, Platform: "openai", ModelLimitsMode: "sync_upstream",
+		Accounts: []SyncAccountDTO{{SourceKind: "gateway_group", GatewayGroupID: &groupID, GatewayRateMode: "max", RateConvertMode: "raw", RateConvertValue: 1, Enabled: true}},
+	})
+	if err != nil {
+		t.Fatalf("create rate sync group: %v", err)
+	}
+	log, err := svc.ApplySyncGroup(context.Background(), rule.ID)
+	if err != nil || !log.Success {
+		t.Fatalf("apply rate sync = %#v, %v", log, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	var ratios map[string]float64
+	if err := json.Unmarshal([]byte(options["GroupRatio"]), &ratios); err != nil {
+		t.Fatalf("decode GroupRatio: %v", err)
+	}
+	if ratios["default"] != 2.5 {
+		t.Fatalf("GroupRatio = %#v", ratios)
+	}
+	if !reflect.DeepEqual(updates, []string{"GroupRatio", "UserUsableGroups", "TopupGroupRatio", "AutoGroups"}) {
+		t.Fatalf("updated options = %#v", updates)
+	}
+	if createCount != 1 || len(channels) != 1 {
+		t.Fatalf("created channels = %d/%d, want 1/1", createCount, len(channels))
+	}
+	var channel map[string]any
+	for _, item := range channels {
+		channel = item
+	}
+	if channel["type"] != float64(60) || channel["key"] == "" || channel["base_url"] != "https://gateway.example" {
+		t.Fatalf("created New API channel = %#v", channel)
+	}
+	if channel["models"] != "gateway-model" || channel["group"] != "default" {
+		t.Fatalf("created New API channel models/groups = %#v", channel)
 	}
 }

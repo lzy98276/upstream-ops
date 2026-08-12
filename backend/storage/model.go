@@ -342,12 +342,15 @@ func (UpstreamSyncTargetGroup) TableName() string { return "upstream_sync_target
 //
 // 分组名称和名称模板创建后固定，不允许二次修改，避免远端对象命名漂移。
 type UpstreamSyncGroup struct {
-	ID                       uint       `gorm:"primaryKey" json:"id"`
-	DisplayName              string     `gorm:"size:256;not null;default:''" json:"display_name"`
-	NameTemplate             string     `gorm:"size:256;not null" json:"name_template"`
-	Name                     string     `gorm:"size:256;not null;uniqueIndex" json:"name"`
-	TargetID                 uint       `gorm:"not null;index" json:"target_id"`
-	TargetGroupIDsJSON       string     `gorm:"type:text;not null" json:"target_group_ids"`
+	ID                 uint   `gorm:"primaryKey" json:"id"`
+	DisplayName        string `gorm:"size:256;not null;default:''" json:"display_name"`
+	NameTemplate       string `gorm:"size:256;not null" json:"name_template"`
+	Name               string `gorm:"size:256;not null;uniqueIndex" json:"name"`
+	TargetID           uint   `gorm:"not null;index" json:"target_id"`
+	TargetGroupIDsJSON string `gorm:"type:text;not null" json:"target_group_ids"`
+	// SyncMode keeps gateway-rate synchronization distinct from account
+	// synchronization. An empty value is reserved for pre-existing records.
+	SyncMode                 string     `gorm:"size:32;not null;default:''" json:"sync_mode"`
 	Platform                 string     `gorm:"size:64;not null" json:"platform"`
 	ModelLimitsMode          string     `gorm:"size:32;not null;default:'sync_upstream'" json:"model_limits_mode"`
 	ModelLimitsText          string     `gorm:"type:text" json:"model_limits,omitempty"`
@@ -358,6 +361,7 @@ type UpstreamSyncGroup struct {
 	CustomErrorCodes         string     `gorm:"type:text" json:"custom_error_codes,omitempty"`
 	RateSortDirection        string     `gorm:"size:16;not null;default:'asc'" json:"rate_sort_direction"`
 	RateScanFingerprint      string     `gorm:"type:text" json:"-"`
+	Sort                     int        `gorm:"not null;default:0" json:"sort"`
 	Enabled                  bool       `gorm:"default:true" json:"enabled"`
 	ApplyStatus              string     `gorm:"size:64" json:"apply_status,omitempty"`
 	ApplyError               string     `gorm:"type:text" json:"apply_error,omitempty"`
@@ -386,6 +390,7 @@ type UpstreamSyncAccount struct {
 	ProxyID          *int64    `json:"proxy_id,omitempty"`
 	Concurrency      int       `gorm:"default:10" json:"concurrency"`
 	Weight           int       `gorm:"default:1" json:"weight"`
+	Priority         int64     `gorm:"default:0" json:"priority"`
 	RateConvertMode  string    `gorm:"size:32;not null;default:'raw'" json:"rate_convert_mode"`
 	RateConvertValue float64   `gorm:"default:1" json:"rate_convert_value"`
 	Enabled          bool      `gorm:"default:true" json:"enabled"`
