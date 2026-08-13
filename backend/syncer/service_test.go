@@ -3194,7 +3194,7 @@ func TestGatewayRateMultiplierRoundsBinaryFloatingPointTails(t *testing.T) {
 	}
 }
 
-func TestNewAPIGatewaySyncUpdatesGroupRatioAndCreatesChannel(t *testing.T) {
+func TestNewAPIGatewayRateSyncUpdatesOnlyGroupRatio(t *testing.T) {
 	options := map[string]string{
 		"AutoGroups":       `[]`,
 		"GroupRatio":       `{"default":1}`,
@@ -3206,6 +3206,7 @@ func TestNewAPIGatewaySyncUpdatesGroupRatioAndCreatesChannel(t *testing.T) {
 	channels := map[int64]map[string]any{}
 	nextChannelID := int64(10)
 	createCount := 0
+	fake := &fakeChannelService{groups: []connector.APIKeyGroup{{Name: "default", Ratio: 2.5}}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/option/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer root-token" {
@@ -3281,7 +3282,7 @@ func TestNewAPIGatewaySyncUpdatesGroupRatioAndCreatesChannel(t *testing.T) {
 		nil,
 		nil,
 		storage.NewChannels(db),
-		&fakeChannelService{},
+		fake,
 		cipher,
 		nil,
 	)
@@ -3300,7 +3301,7 @@ func TestNewAPIGatewaySyncUpdatesGroupRatioAndCreatesChannel(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("save gateway route: %v", err)
 	}
-	svc := newTestServiceWithGateway(t, db, &fakeChannelService{}, gatewaySvc, "https://gateway.example")
+	svc := newTestServiceWithGateway(t, db, fake, gatewaySvc, "https://gateway.example")
 	target, err := svc.CreateTarget(context.Background(), TargetInput{Name: "newapi", TargetType: "newapi", BaseURL: server.URL, AdminAPIKey: "root-token", Enabled: true})
 	if err != nil {
 		t.Fatalf("create target: %v", err)
@@ -3317,12 +3318,19 @@ func TestNewAPIGatewaySyncUpdatesGroupRatioAndCreatesChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create rate sync group: %v", err)
 	}
+	rule.SyncMode = "gateway_rate"
+	rule, err = svc.UpdateSyncGroup(rule.ID, *rule)
+	if err != nil {
+		t.Fatalf("set gateway rate sync mode: %v", err)
+	}
 	log, err := svc.ApplySyncGroup(context.Background(), rule.ID)
 	if err != nil || !log.Success {
 		t.Fatalf("apply rate sync = %#v, %v", log, err)
 	}
+	if log, err := svc.ApplySyncGroup(context.Background(), rule.ID); err != nil || !log.Success {
+		t.Fatalf("apply unchanged rate sync = %#v, %v", log, err)
+	}
 	mu.Lock()
-	defer mu.Unlock()
 	var ratios map[string]float64
 	if err := json.Unmarshal([]byte(options["GroupRatio"]), &ratios); err != nil {
 		t.Fatalf("decode GroupRatio: %v", err)
@@ -3330,20 +3338,47 @@ func TestNewAPIGatewaySyncUpdatesGroupRatioAndCreatesChannel(t *testing.T) {
 	if ratios["default"] != 2.5 {
 		t.Fatalf("GroupRatio = %#v", ratios)
 	}
-	if !reflect.DeepEqual(updates, []string{"GroupRatio", "UserUsableGroups", "TopupGroupRatio", "AutoGroups"}) {
-		t.Fatalf("updated options = %#v", updates)
+	if !reflect.DeepEqual(updates, []string{"GroupRatio"}) {
+		t.Fatalf("updated options = %#v, want only GroupRatio", updates)
 	}
-	if createCount != 1 || len(channels) != 1 {
-		t.Fatalf("created channels = %d/%d, want 1/1", createCount, len(channels))
+	if createCount != 0 || len(channels) != 0 {
+		t.Fatalf("rate sync created New API channels = %d/%d, want none", createCount, len(channels))
 	}
-	var channel map[string]any
-	for _, item := range channels {
-		channel = item
+	mu.Unlock()
+
+	// A scan with unchanged effective rates performs no remote write.
+	svc.SyncAllOnRateScan(context.Background())
+	mu.Lock()
+	if !reflect.DeepEqual(updates, []string{"GroupRatio"}) {
+		mu.Unlock()
+		t.Fatalf("unchanged scan writes = %#v", updates)
 	}
-	if channel["type"] != float64(60) || channel["key"] == "" || channel["base_url"] != "https://gateway.example" {
-		t.Fatalf("created New API channel = %#v", channel)
+	mu.Unlock()
+
+	// The upstream multiplier changes after the regular rate scan. The gateway
+	// cache must be invalidated so the new effective rate reaches New API.
+	fake.groups[0].Ratio = 3.75
+	svc.SyncAllOnRateScan(context.Background())
+	mu.Lock()
+	if err := json.Unmarshal([]byte(options["GroupRatio"]), &ratios); err != nil {
+		mu.Unlock()
+		t.Fatalf("decode changed GroupRatio: %v", err)
 	}
-	if channel["models"] != "gateway-model" || channel["group"] != "default" {
-		t.Fatalf("created New API channel models/groups = %#v", channel)
+	if ratios["default"] != 3.75 || !reflect.DeepEqual(updates, []string{"GroupRatio", "GroupRatio"}) {
+		mu.Unlock()
+		t.Fatalf("upstream rate scan GroupRatio/writes = %#v/%#v", ratios, updates)
+	}
+	// A manual New API change must be refreshed before its rate-scan
+	// fingerprint is evaluated, then restored from the gateway source.
+	options["GroupRatio"] = `{"default":1.25}`
+	mu.Unlock()
+	svc.SyncAllOnRateScan(context.Background())
+	mu.Lock()
+	defer mu.Unlock()
+	if err := json.Unmarshal([]byte(options["GroupRatio"]), &ratios); err != nil {
+		t.Fatalf("decode restored GroupRatio: %v", err)
+	}
+	if ratios["default"] != 3.75 || !reflect.DeepEqual(updates, []string{"GroupRatio", "GroupRatio", "GroupRatio"}) {
+		t.Fatalf("target rate scan GroupRatio/writes = %#v/%#v", ratios, updates)
 	}
 }

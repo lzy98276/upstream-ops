@@ -1643,6 +1643,9 @@ func (s *Service) applyNewAPISyncGroup(ctx context.Context, syncGroup *storage.U
 	if err != nil {
 		return nil, err
 	}
+	if syncModeForGroup(syncGroup, accounts) == "gateway_rate" {
+		return s.applyNewAPIRateSyncGroup(ctx, syncGroup, target, accounts)
+	}
 	if !target.Enabled {
 		return s.appendLog(syncGroup.ID, target.ID, "apply", false, "target disabled")
 	}
@@ -1741,6 +1744,43 @@ func (s *Service) applyNewAPISyncGroup(ctx context.Context, syncGroup *storage.U
 	return s.appendLog(syncGroup.ID, target.ID, "apply", true, msg)
 }
 
+// applyNewAPIRateSyncGroup updates only the selected New API groups' ratios.
+// Multiplier synchronization deliberately does not create a type-60 channel.
+func (s *Service) applyNewAPIRateSyncGroup(ctx context.Context, syncGroup *storage.UpstreamSyncGroup, target *storage.UpstreamSyncTarget, accounts []storage.UpstreamSyncAccount) (*LogDTO, error) {
+	if !target.Enabled {
+		return s.appendLog(syncGroup.ID, target.ID, "apply", false, "target disabled")
+	}
+	if len(accounts) != 1 || !isGatewaySyncAccount(&accounts[0]) {
+		return s.appendLog(syncGroup.ID, target.ID, "apply", false, "New API multiplier sync requires exactly one gateway group")
+	}
+	if _, err := s.SyncTargetGroups(ctx, target.ID); err != nil {
+		_ = s.syncGroups.UpdateStatus(syncGroup.ID, "failed", err.Error(), nil)
+		return s.appendLog(syncGroup.ID, target.ID, "apply", false, err.Error())
+	}
+	_, selectedGroups, _, err := s.selectedTargetGroups(syncGroup)
+	if err != nil {
+		_ = s.syncGroups.UpdateStatus(syncGroup.ID, "blocked_missing_group", err.Error(), nil)
+		return s.appendLog(syncGroup.ID, target.ID, "apply", false, err.Error())
+	}
+	apiKey, err := s.cipher.Decrypt(target.AdminAPIKeyCipher)
+	if err != nil {
+		return nil, err
+	}
+	messages, changes, err := s.syncNewAPIGroupRates(ctx, syncGroup, target, accounts, selectedGroups, apiKey)
+	if err != nil {
+		_ = s.syncGroups.UpdateStatus(syncGroup.ID, "failed", err.Error(), nil)
+		return s.appendLog(syncGroup.ID, target.ID, "apply", false, err.Error())
+	}
+	now := time.Now()
+	_ = s.syncGroups.UpdateStatus(syncGroup.ID, "applied", "", &now)
+	msg := buildApplyLogMessage(syncGroup, target, selectedGroups, 1, nil, messages, changes, 0, 0)
+	if len(changes) == 0 {
+		return &LogDTO{SyncGroupID: syncGroup.ID, TargetID: target.ID, Action: "apply", Success: true, Message: msg, CreatedAt: now}, nil
+	}
+	s.notifySyncGroupApplyChanged(ctx, syncGroup, target, 1, nil, changes)
+	return s.appendLog(syncGroup.ID, target.ID, "apply", true, msg)
+}
+
 // syncNewAPIGroupRates mirrors Sub2API's gateway-rate phase: every gateway
 // source applies its calculated rate to the selected target groups before all
 // sync accounts are materialized as remote channels.
@@ -1781,7 +1821,13 @@ func (s *Service) syncNewAPIGroupRates(
 		}
 	}
 	if len(changes) > 0 {
-		if err := s.putNewAPIGroupSettings(ctx, target.BaseURL, apiKey, settings); err != nil {
+		groupRatios, err := marshalNewAPIGroupRatios(settings.GroupRatios, settings.GroupOrder)
+		if err != nil {
+			return nil, nil, err
+		}
+		// Multiplier synchronization owns only GroupRatio. Keep the other
+		// administrator options untouched, including AutoGroups and labels.
+		if err := s.putNewAPIOption(ctx, target.BaseURL, apiKey, "GroupRatio", string(groupRatios)); err != nil {
 			return nil, nil, err
 		}
 		if _, err := s.SyncTargetGroups(ctx, target.ID); err != nil {
@@ -3281,6 +3327,12 @@ func (s *Service) ListSyncGroupLogs(syncGroupID uint, page, pageSize int) ([]Log
 }
 
 func (s *Service) SyncAllOnRateScan(ctx context.Context) {
+	// The channel rate scan has just refreshed upstream ratios. Gateway rate
+	// sources derive their effective rate from the same data, so discard its
+	// short-lived cache before building synchronization fingerprints.
+	if s.gateway != nil {
+		s.gateway.InvalidateChannelGroupsCache()
+	}
 	syncGroups, err := s.syncGroups.List()
 	if err != nil {
 		if s.log != nil {
@@ -3288,6 +3340,7 @@ func (s *Service) SyncAllOnRateScan(ctx context.Context) {
 		}
 		return
 	}
+	refreshedTargets := make(map[uint]bool)
 	for _, syncGroup := range syncGroups {
 		if !syncGroup.Enabled {
 			continue
@@ -3301,6 +3354,15 @@ func (s *Service) SyncAllOnRateScan(ctx context.Context) {
 		}
 		if !target.Enabled {
 			continue
+		}
+		if !refreshedTargets[target.ID] {
+			if _, err := s.SyncTargetGroups(ctx, target.ID); err != nil {
+				if s.log != nil {
+					s.log.Warn("refresh target groups for rate scan", "syncGroupID", syncGroup.ID, "targetID", target.ID, "err", err)
+				}
+				continue
+			}
+			refreshedTargets[target.ID] = true
 		}
 		accounts, err := s.syncAccounts.ListBySyncGroupID(syncGroup.ID)
 		if err != nil {

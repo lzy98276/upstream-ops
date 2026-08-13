@@ -734,7 +734,7 @@ export function UpstreamSyncSettings() {
     setLogs([]);
     setLogSyncGroupID(null);
     void loadTargetGroups(target.id);
-    if (target.target_type !== "newapi") void loadTargetProxies(target.id);
+    if (target.target_type === "sub2api") void loadTargetProxies(target.id);
   }
 
   function openNewSyncGroupDialog(targetID = selectedTargetID) {
@@ -748,7 +748,7 @@ export function UpstreamSyncSettings() {
     setSyncGroupDialogOpen(true);
     void loadTargetGroups(targetID);
     const target = targets.find((item) => item.id === targetID);
-    if (target?.target_type !== "newapi") void loadTargetProxies(targetID);
+    if (target?.target_type === "sub2api") void loadTargetProxies(targetID);
   }
 
   function openEditSyncGroupDialog(syncGroup: UpstreamSyncGroup) {
@@ -757,7 +757,7 @@ export function UpstreamSyncSettings() {
     setSyncGroupDialogOpen(true);
     void loadTargetGroups(syncGroup.target_id);
     const target = targets.find((item) => item.id === syncGroup.target_id);
-    if (target?.target_type !== "newapi")
+    if (target?.target_type === "sub2api")
       void loadTargetProxies(syncGroup.target_id);
     form.accounts.forEach((account) => {
       if (account.source_channel_id)
@@ -1010,7 +1010,7 @@ export function UpstreamSyncSettings() {
         selectedTargetID === target.id
       ) {
         await loadTargetGroups(target.id);
-        if (target.target_type !== "newapi") await loadTargetProxies(target.id);
+        if (target.target_type === "sub2api") await loadTargetProxies(target.id);
       }
       toast.success(`${target.name} 分组已同步`);
     } catch (err) {
