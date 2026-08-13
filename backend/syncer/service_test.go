@@ -2571,6 +2571,100 @@ func TestGatewayRateSyncSkipsUnchangedTargetMultiplier(t *testing.T) {
 	}
 }
 
+func TestSub2APIGatewayRateSyncOnRateScanUpdatesSourceAndTargetChanges(t *testing.T) {
+	srv, admin := newAdminServer(t)
+	defer srv.Close()
+	db := openSyncerTestDB(t)
+	cipher, err := crypto.NewCipher("test-secret")
+	if err != nil {
+		t.Fatalf("new cipher: %v", err)
+	}
+	sourceGroupID := int64(1)
+	fake := &fakeChannelService{groups: []connector.APIKeyGroup{{
+		ID: &sourceGroupID, Name: "source", Ratio: 2.5,
+	}}}
+	gatewaySvc := gateway.NewService(
+		storage.NewGatewayGroups(db), storage.NewGatewayKeys(db), storage.NewGatewayRoutes(db),
+		nil, nil, storage.NewChannels(db), fake, cipher, nil,
+	)
+	gatewayGroup, err := gatewaySvc.CreateGroup(gateway.CreateGroupInput{Name: "rate-source"})
+	if err != nil {
+		t.Fatalf("create gateway group: %v", err)
+	}
+	if err := storage.NewGatewayRoutes(db).SaveForGroup(gatewayGroup.ID, []storage.GatewayRoute{{
+		SourceChannelID: 1, SourceGroupID: &sourceGroupID, SourceGroupName: "source",
+		Enabled: true, BillingRateMultiplier: 2.5,
+	}}); err != nil {
+		t.Fatalf("save gateway route: %v", err)
+	}
+	svc := newTestServiceWithGateway(t, db, fake, gatewaySvc, "https://gateway.example")
+	target, err := svc.CreateTarget(context.Background(), TargetInput{
+		Name: "target", BaseURL: srv.URL, AdminAPIKey: "admin-key", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	targetGroups, err := svc.SyncTargetGroups(context.Background(), target.ID)
+	if err != nil {
+		t.Fatalf("sync target groups: %v", err)
+	}
+	gatewayGroupID := gatewayGroup.ID
+	if _, err := svc.CreateSyncGroup(SyncGroupDTO{
+		NameTemplate: "sub2-rate-scan", TargetID: target.ID, TargetGroupIDs: []uint{targetGroups[0].ID},
+		SyncMode: "gateway_rate", Platform: "openai", ModelLimitsMode: "all",
+		Accounts: []SyncAccountDTO{{
+			SourceKind: "gateway_group", GatewayGroupID: &gatewayGroupID, GatewayRateMode: "max",
+			RateConvertMode: "raw", RateConvertValue: 1, Enabled: true,
+		}},
+	}); err != nil {
+		t.Fatalf("create gateway rate sync group: %v", err)
+	}
+
+	svc.SyncAllOnRateScan(context.Background())
+	assertSub2APITargetGroupRate(t, admin, 2.5, 1)
+	svc.SyncAllOnRateScan(context.Background())
+	assertSub2APITargetGroupRate(t, admin, 2.5, 1)
+
+	// The monitored upstream group changed. The scan must clear the gateway's
+	// source-group cache before calculating the synchronization fingerprint.
+	fake.groups[0].Ratio = 3.75
+	svc.SyncAllOnRateScan(context.Background())
+	assertSub2APITargetGroupRate(t, admin, 3.75, 2)
+
+	// A gateway-side multiplier configuration change also changes its effective
+	// rate and must be propagated on the next rate scan.
+	if err := storage.NewGatewayRoutes(db).SaveForGroup(gatewayGroup.ID, []storage.GatewayRoute{{
+		SourceChannelID: 1, SourceGroupID: &sourceGroupID, SourceGroupName: "source",
+		Enabled: true, BillingRateMultiplier: 4.2, RateConvertMode: "custom", RateConvertValue: 4.2,
+	}}); err != nil {
+		t.Fatalf("update gateway route rate: %v", err)
+	}
+	svc.SyncAllOnRateScan(context.Background())
+	assertSub2APITargetGroupRate(t, admin, 4.2, 3)
+
+	// An operator changed the target multiplier directly in Sub2API. Refreshing
+	// target groups before fingerprinting detects it and restores the gateway rate.
+	admin.mu.Lock()
+	admin.groups[0]["ratio"] = 1.25
+	admin.mu.Unlock()
+	svc.SyncAllOnRateScan(context.Background())
+	assertSub2APITargetGroupRate(t, admin, 4.2, 4)
+	svc.SyncAllOnRateScan(context.Background())
+	assertSub2APITargetGroupRate(t, admin, 4.2, 4)
+}
+
+func assertSub2APITargetGroupRate(t *testing.T, admin *adminServerState, want float64, wantUpdates int) {
+	t.Helper()
+	admin.mu.Lock()
+	defer admin.mu.Unlock()
+	if got, ok := admin.groups[0]["ratio"].(float64); !ok || got != want {
+		t.Fatalf("target group ratio = %#v, want %v", admin.groups[0]["ratio"], want)
+	}
+	if got := len(admin.updateGroups); got != wantUpdates {
+		t.Fatalf("target group updates = %d, want %d (%#v)", got, wantUpdates, admin.updateGroups)
+	}
+}
+
 func TestReorderSub2APIGroupsWritesRemoteSortOrder(t *testing.T) {
 	srv, admin := newAdminServer(t)
 	defer srv.Close()

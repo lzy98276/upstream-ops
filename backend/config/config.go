@@ -393,6 +393,17 @@ func load(path string, withEnv bool) (*Config, string, error) {
 	if err := v.Unmarshal(cfg); err != nil {
 		return nil, "", fmt.Errorf("unmarshal config: %w", err)
 	}
+	// The admin credentials can be edited and persisted from the settings page.
+	// Once a config file exists, it is the source of truth for that section.
+	// This prevents Docker Compose's fallback AUTH_* values from overwriting a
+	// password that was already saved in the mounted config file on restart.
+	if withEnv && v.ConfigFileUsed() != "" {
+		persisted, _, err := load(v.ConfigFileUsed(), false)
+		if err != nil {
+			return nil, "", fmt.Errorf("load persisted auth config: %w", err)
+		}
+		cfg.Auth = persisted.Auth
+	}
 	cfg.Upstream = cfg.Upstream.WithDefaults()
 	cfg.Gateway = cfg.Gateway.WithDefaults()
 	cfg.Pricing = cfg.Pricing.WithDefaults()

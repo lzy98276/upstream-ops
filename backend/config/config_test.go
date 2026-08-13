@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -48,5 +49,48 @@ func TestGatewayConfigWithDefaults(t *testing.T) {
 	}
 	if custom.ModelsCacheTTLSeconds != DefaultGatewayModelsCacheTTLSeconds {
 		t.Fatalf("models cache ttl = %d", custom.ModelsCacheTTLSeconds)
+	}
+}
+
+func TestLoadKeepsPersistedAuthConfigWhenAuthEnvironmentIsSet(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	persisted := &Config{
+		Auth: AuthConfig{
+			Enabled:         true,
+			Username:        "saved-admin",
+			Password:        "saved-password",
+			TokenSecret:     "saved-token-secret",
+			SessionTTLHours: 48,
+		},
+	}
+	if err := Save(path, persisted); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	for key, value := range map[string]string{
+		"AUTH_ENABLED":      "false",
+		"ADMIN_USERNAME":    "admin",
+		"ADMIN_PASSWORD":    "",
+		"AUTH_TOKEN_SECRET": "",
+	} {
+		oldValue, wasSet := os.LookupEnv(key)
+		if err := os.Setenv(key, value); err != nil {
+			t.Fatalf("set %s: %v", key, err)
+		}
+		t.Cleanup(func() {
+			if wasSet {
+				_ = os.Setenv(key, oldValue)
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		})
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Auth != persisted.Auth {
+		t.Fatalf("auth = %#v, want %#v", cfg.Auth, persisted.Auth)
 	}
 }
